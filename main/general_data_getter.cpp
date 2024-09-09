@@ -14,6 +14,7 @@ extern "C" {
     #include "sensors/bmp180/bmp180.h"
     #include "sensors/dht22/dht22.h"
     #include "sensors/yl69/yl69.h"
+    
 
     // NVS headers
     #include "nvs_flash.h"
@@ -32,6 +33,14 @@ extern "C" {
 #define VOLTAGE_DIVIDER_GPIO GPIO_NUM_33 // pin
 #define ADC_PIN ADC_CHANNEL_0 // pin
 #define ADC_POWER_DOWN_DELAY 10
+
+// BMP180
+#define I2C_NUM_0 0
+#define BMP180_ADDRESS 0x77
+
+// DHT22
+#define DHT_TYPE_DHT22 22
+
 
 const char* LOG_TAG = "DATA-GETTER";
 
@@ -109,6 +118,16 @@ void displaySensors(const std::vector<SensorInfo>& sensors) {
     // Output from log: I (xxx) Sensor Info: ID: sensor_1, Name: BMP180
 }
 // TXT FILE <end>
+
+class ESP32Base {
+public:
+    virtual ~ESP32Base() {}
+    void deepSleep(const char* logTag, uint64_t time_in_us);
+    float checkBatteryLevel(adc_oneshot_unit_handle_t adc1_handle);
+    float map(float x, float in_min, float in_max, float out_min, float out_max);
+    virtual void readSensorData() = 0;
+};
+
 
 // Deep Sleep and Battery Managment
 // DEEP SLEEP FUNCTION
@@ -191,16 +210,7 @@ void formatData(const char* sensorName, float data) {
     storeDataInNVS(sensorName, data);  // Store sensor data in NVS
 }
 
-class ESP32Base; // Forward declaration
 
-class ESP32Base {
-public:
-    virtual ~ESP32Base() {}
-    void deepSleep(const char* logTag, uint64_t time_in_us);
-    float checkBatteryLevel(adc_oneshot_unit_handle_t adc1_handle);
-    float map(float x, float in_min, float in_max, float out_min, float out_max);
-    virtual void readSensorData() = 0;
-};
 
 
 class ESP32DerivedClass : public ESP32Base {
@@ -212,7 +222,7 @@ public:
     std::vector<std::string> ky037Data;
 
     void readSensorData() override {
-        std::vector<std::string> sensorList = getSensorsFromFile("sensors.txt");
+        std::vector<SensorInfo> sensorList = getSensorsFromFile("sensors.txt"); 
         for (const auto& sensor : sensorList) {
             ESP_LOGI("Sensor Info", "ID: %s, Name: %s", sensor.id.c_str(), sensor.name.c_str());
 
@@ -235,11 +245,21 @@ private:
 
     //SDA(GPIO 21 ou 22) | SCL(GPIO 22 ou 23) | VCC e GND
     void readBMP180() {
-        bmp180_t sensor;
-        if (bmp180_init(&sensor, I2C_NUM_0, BMP180_I2C_ADDRESS) == ESP_OK) {
-            float pressure;
-            bmp180_read_pressure(&sensor, &pressure);
-            formatData("BMP180", pressure);
+        float temperature;
+        uint32_t pressure;
+
+        if (bmp180_init(GPIO_NUM_21, GPIO_NUM_22) == ESP_OK) {
+            if (bmp180_read_temperature(&temperature) == ESP_OK) {
+                formatData("BMP180_Temperature", temperature);
+            } else {
+                ESP_LOGE("BMP180", "Failed to read temperature");
+            }
+
+            if (bmp180_read_pressure(&pressure) == ESP_OK) {
+                formatData("BMP180_Pressure", pressure);
+            } else {
+                ESP_LOGE("BMP180", "Failed to read pressure");
+            }
         } else {
             ESP_LOGE("BMP180", "Failed to initialize BMP180");
         }
@@ -661,7 +681,7 @@ extern "C" void app_main() {
         if (espNowConnected && dataInNvs) {
             // If connected, send all NVS data to the connected ESP32
             // It will be a loop until all data is sent and received
-            esp_err_t err = sendNVSDataToDrone(macAddressDrone) // -> it needs to be a loop;
+            esp_err_t err = sendNVSDataToDrone(macAddressDrone); // -> it needs to be a loop;
 
             if (err == ESP_OK) {
                 // Erase NVS data after successful transmission
@@ -670,7 +690,7 @@ extern "C" void app_main() {
                 // Disconnect and enter deep sleep
                 ESP_LOGI("ESP-NOW", "All data sent successfully and NVS clear, entering deep sleep.");
 
-                esp32.deepSleep(tag, deepSleepDuration_us);
+                esp32.deepSleep("SLEEP", deepSleepDuration_us);
             } else {
                 ESP_LOGE("ESP-NOW", "Failed to send data. Retrying...");
                 // Optionally, add a delay or retry mechanism here
