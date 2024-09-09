@@ -32,6 +32,8 @@ extern "C" {
 #define ADC_PIN ADC_CHANNEL_0 // pin
 #define ADC_POWER_DOWN_DELAY 10
 
+uint8_t macAddressDrone[6] = {0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6}; // DEPOIS MUDAR, PARA A ESP DO DRONE
+
 // 10 - 12 KB of data into the NVS
 // Flowchart
 // Deep Sleep function, Check battery level function, Cryptograph data
@@ -393,31 +395,34 @@ std::string serializeSensorData(const std::vector<SensorData>& sensorDataList) {
     // output something like this {"BMP180": 1013.25, "DHT22": 24.5}
 }
 
-esp_err_t sendNVSDataToDrone() {
-    // Get all data from NVS
-    std::vector<SensorData> sensorDataList = getAllDataFromNVS();
 
-    // Check if there is any data to send
+#define MAX_PAYLOAD_SIZE 250
+
+esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
+    std::vector<SensorData> sensorDataList = getAllDataFromNVS();
     if (sensorDataList.empty()) {
         ESP_LOGI("ESP-NOW", "No data in NVS to send.");
         return ESP_ERR_NOT_FOUND;
     }
 
-    // Serialize the sensor data
     std::string serializedData = serializeSensorData(sensorDataList);
+    size_t dataLength = serializedData.length();
 
-    // Send the serialized data using ESP-NOW --> Remember the encryption using the AES
-    esp_err_t err = esp_now_send(peerInfo.peer_addr, (uint8_t*)serializedData.c_str(), serializedData.length());
-    if (err != ESP_OK) {
-        ESP_LOGE("ESP-NOW", "Error sending data: %s", esp_err_to_name(err));
-        return err;
+    // Split data into chunks if necessary
+    for (size_t offset = 0; offset < dataLength; offset += MAX_PAYLOAD_SIZE) {
+        size_t chunkSize = std::min(MAX_PAYLOAD_SIZE, dataLength - offset);
+        esp_err_t err = esp_now_send(macAddress, (const uint8_t*)serializedData.c_str() + offset, chunkSize);
+        if (err != ESP_OK) {
+            ESP_LOGE("ESP-NOW", "Error sending data: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
-    // Erase NVS data after successful transmission
-    err = eraseAllDataFromNVS();
-    if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error erasing data from NVS: %s", esp_err_to_name(err));
-    }
+    // // Erase NVS data after successful transmission -> JÀ ACONTECE NO LOOP main
+    // err = eraseAllDataFromNVS();
+    // if (err != ESP_OK) {
+    //     ESP_LOGE("NVS", "Error erasing data from NVS: %s", esp_err_to_name(err));
+    // }
 
     return ESP_OK;
 }
@@ -605,10 +610,11 @@ extern "C" void app_main() {
 
         espNowConnected = tryConnectToDrone(); // DATA RECEIVED (just check one time)
 
-        if (espNowConnected) {
+        if (espNowConnected && hasValidDataInNVS) {
             // If connected, send all NVS data to the connected ESP32
             // It will be a loop until all data is sent and received
-            esp_err_t err = sendNVSDataToDrone();
+            esp_err_t err = sendNVSDataToDrone(macAddressDrone) // -> it needs to be a loop;
+
             if (err == ESP_OK) {
                 // Erase NVS data after successful transmission
                 eraseAllDataFromNVS();
@@ -616,7 +622,6 @@ extern "C" void app_main() {
                 // Disconnect and enter deep sleep
                 ESP_LOGI("ESP-NOW", "All data sent successfully and NVS clear, entering deep sleep.");
 
-                espNowDisconnect(); // DO NOT NEED <- ESP-Now only occurs when data is sent
                 esp32.deepSleep(tag, deepSleepDuration_us);
             } else {
                 ESP_LOGE("ESP-NOW", "Failed to send data. Retrying...");
