@@ -21,6 +21,7 @@ extern "C" {
     #include "encrypt.h"
 
 }
+
 #include <string>
 #include <vector>
 #include <sstream>
@@ -31,6 +32,8 @@ extern "C" {
 #define VOLTAGE_DIVIDER_GPIO GPIO_NUM_33 // pin
 #define ADC_PIN ADC_CHANNEL_0 // pin
 #define ADC_POWER_DOWN_DELAY 10
+
+const char* LOG_TAG = "DATA-GETTER";
 
 uint8_t macAddressDrone[6] = {0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6}; // DEPOIS MUDAR, PARA A ESP DO DRONE
 
@@ -187,6 +190,8 @@ void formatData(const char* sensorName, float data) {
     ESP_LOGI("SensorData", "Sensor: %s, Data: %.2f", sensorName, data);
     storeDataInNVS(sensorName, data);  // Store sensor data in NVS
 }
+
+class ESP32Base; // Forward declaration
 
 class ESP32Base {
 public:
@@ -410,7 +415,8 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
 
     // Split data into chunks if necessary
     for (size_t offset = 0; offset < dataLength; offset += MAX_PAYLOAD_SIZE) {
-        size_t chunkSize = std::min(MAX_PAYLOAD_SIZE, dataLength - offset);
+        //size_t chunkSize = std::min(MAX_PAYLOAD_SIZE, dataLength - offset);
+        size_t chunkSize = std::min(static_cast<size_t>(MAX_PAYLOAD_SIZE), dataLength - offset);
         esp_err_t err = esp_now_send(macAddress, (const uint8_t*)serializedData.c_str() + offset, chunkSize);
         if (err != ESP_OK) {
             ESP_LOGE("ESP-NOW", "Error sending data: %s", esp_err_to_name(err));
@@ -528,7 +534,7 @@ esp_err_t eraseAllDataFromNVS() {
 // AVALIAR !!!
 bool espNowConnected = false;
 
-// Callback function to handle data received via ESP-NOW
+// Callback function to handle data received via ESP-NOW | FUNÇÂO VAI FICAR NO DRONE, DEPOIS DESLOCAR
 void onDataReceive(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     // Convert the data to a string
     std::string receivedMessage((char*)data, data_len);
@@ -540,27 +546,67 @@ void onDataReceive(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
 
         // Respond with "YES"
         const char* responseMsg = "YES";
-        esp_now_send(mac_addr, (uint8_t*)responseMsg, strlen(responseMsg));
-
-        ESP_LOGI(LOG_TAG, "Responded with 'YES' to: %02x:%02x:%02x:%02x:%02x:%02x",
-            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        esp_err_t err = esp_now_send(mac_addr, (uint8_t*)responseMsg, strlen(responseMsg));
+        if (err != ESP_OK) {
+            ESP_LOGE(LOG_TAG, "Error sending response 'YES': %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(LOG_TAG, "Responded with 'YES' to: %02x:%02x:%02x:%02x:%02x:%02x",
+                mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        }
+    } else {
+        ESP_LOGW(LOG_TAG, "Received unknown message: %s", receivedMessage.c_str());
     }
 }
 
-// On the master ESP32, handle the response in the callback and update the `espNowConnected` flag
+bool checkESPNowConnection(uint8_t *targetMac) {
+    // Set the flag to true, indicating we are awaiting a response
+    awaitingResponse = true;
+    espNowConnected = false;  // Reset connection status
+
+    // Send the "AUH?" request
+    const char* requestMessage = "AUH?";
+    esp_err_t result = esp_now_send(targetMac, (uint8_t*)requestMessage, strlen(requestMessage));
+    if (result != ESP_OK) {
+        ESP_LOGE(LOG_TAG, "Error sending 'AUH?' request: %s", esp_err_to_name(result));
+        return false;
+    }
+
+    ESP_LOGI(LOG_TAG, "Sent 'AUH?' request to: %02x:%02x:%02x:%02x:%02x:%02x",
+        targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
+
+    // Wait for the response (you can adjust the wait time as needed)
+    int retries = 10;  // Number of attempts to wait for a response
+    while (awaitingResponse && retries > 0) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // Wait 100ms per iteration
+        retries--;
+    }
+
+    if (espNowConnected) {
+        ESP_LOGI(LOG_TAG, "ESP-NOW connection established with: %02x:%02x:%02x:%02x:%02x:%02x",
+            targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
+    } else {
+        ESP_LOGW(LOG_TAG, "No response from: %02x:%02x:%02x:%02x:%02x:%02x",
+            targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
+    }
+
+    return espNowConnected;
+}
 void onResponseReceived(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
     // Convert the data to a string
     std::string response((char*)data, data_len);
 
-    // Check if the response is "YES"
-    if (response == "YES") {
+    if (awaitingResponse && response == "YES") {
         ESP_LOGI(LOG_TAG, "Received 'YES' from: %02x:%02x:%02x:%02x:%02x:%02x",
             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
         // Mark the connection as successful
         espNowConnected = true;
+        awaitingResponse = false;  // Clear the flag after response
+    } else {
+        ESP_LOGW(LOG_TAG, "Received unexpected response: %s", response.c_str());
     }
 }
+
 // FIM DO AVALIAR !!!
 
 // Para verificar se há dados no NVS, pois se não há, não faz sentido mandar para o Drone.
@@ -604,13 +650,15 @@ extern "C" void app_main() {
     // Configuration for deep sleep
     uint64_t deepSleepDuration_us = 10 * 1000000;  // 10 seconds in microseconds
     bool espNowConnected = false;
+    bool dataInNvs = false;
 
     while (true) {
+        initESPNow();
+
         // Try to connect to another ESP32 via ESP-NOW
-
-        espNowConnected = tryConnectToDrone(); // DATA RECEIVED (just check one time)
-
-        if (espNowConnected && hasValidDataInNVS) {
+        espNowConnected = checkESPNowConnection(macAddressDrone); // DATA RECEIVED (just check one time)
+        dataInNvs = hasValidDataInNVS();
+        if (espNowConnected && dataInNvs) {
             // If connected, send all NVS data to the connected ESP32
             // It will be a loop until all data is sent and received
             esp_err_t err = sendNVSDataToDrone(macAddressDrone) // -> it needs to be a loop;
