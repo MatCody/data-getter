@@ -1,9 +1,19 @@
-# Register your main source file as a component
+# Set the C standard to C11
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)  # Use GNU extensions, resulting in -std=gnu11
+
+# Set the C++ standard to C++11
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 idf_component_register(SRCS "general_data_getter.cpp"
-                       INCLUDE_DIRS "." 
-                                    "sensors/bmp180" 
-                                    "sensors/dht22" 
+                       "sensors/bmp180/bmp180.c"
+                       "sensors/dht22/dht22.c"
+                       "sensors/yl69/yl69.c"
+                       "sensors/acoustic/acoustic.c"
+                       INCLUDE_DIRS "sensors/bmp180"
+                                    "sensors/dht22"
                                     "sensors/yl69"
-				    "sensors/acoustic")
-                                    
-target_compile_options(${COMPONENT_LIB} PRIVATE -fexceptions)
+                                    "sensors/acoustic")
+

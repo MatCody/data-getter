@@ -23,11 +23,11 @@ bool check_acoustic()
 
 void init_acoustic(bool ft)
 {
-    gpio_pad_select_gpio(ACOUSTIC_ENABLE);
+    esp_rom_gpio_pad_select_gpio(ACOUSTIC_ENABLE);
     gpio_set_direction(ACOUSTIC_ENABLE, GPIO_MODE_INPUT);
     gpio_set_pull_mode(ACOUSTIC_ENABLE, GPIO_PULLUP_ONLY);	// Set PullUp
     
-    gpio_pad_select_gpio(ACOUSTIC_DATA);
+    esp_rom_gpio_pad_select_gpio(ACOUSTIC_DATA);
     gpio_set_direction(ACOUSTIC_DATA, GPIO_MODE_INPUT);
     gpio_set_pull_mode(ACOUSTIC_DATA, GPIO_PULLDOWN_ONLY);	// Set PullDown
 } 

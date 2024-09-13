@@ -10,6 +10,8 @@ extern "C" {
     #include "esp_event.h"
     #include "driver/gpio.h"
     #include "esp_system.h"
+    #include "hal/adc_types.h"
+
 
     // SENSORS headers
     #include "sensors/bmp180/bmp180.h"
@@ -30,6 +32,7 @@ extern "C" {
 #include <sstream>
 #include <fstream>
 #include <cstring>
+#include <unordered_map>
 
 // Declare 'voltage dividir GPIO' | declare the 'ADC_PIN' | declare 'ADC_POWER_DOWN_DELAY''
 #define VOLTAGE_DIVIDER_GPIO GPIO_NUM_33 // pin
@@ -52,6 +55,10 @@ const char* LOG_TAG = "DATA-GETTER";
 uint8_t macAddressDrone[6] = {0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6}; // DEPOIS MUDAR, PARA A ESP DO DRONE
 
 bool awaitingResponse = false;
+
+adc_oneshot_unit_handle_t adc_handle = NULL;
+
+
 
 // Function to initialize Wi-Fi in station mode (required for ESP-NOW)
 void initWiFi() {
@@ -90,10 +97,15 @@ void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status) {
     }
 }
 
+
+void onResponseReceived(const esp_now_recv_info_t* info, const uint8_t* data, int len);
+
 // Main initialization function for ESP-NOW
 void initESPNow() {
     // Initialize NVS (non-volatile storage) to store Wi-Fi settings
-    esp_err_t ret = nvs_flash_init();
+    esp_err_t ret; // Declare ret once
+
+    ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
@@ -127,7 +139,7 @@ void initESPNow() {
     }
 
     // Optionally, you can also register a callback for receiving data
-    esp_err_t ret = esp_now_register_recv_cb(onResponseReceived);
+    ret = esp_now_register_recv_cb(onResponseReceived);
     if (ret != ESP_OK) {
         ESP_LOGE("ESP-NOW", "Failed to register receive callback: %s", esp_err_to_name(ret));
         return;
@@ -236,8 +248,6 @@ float ESP32Base::checkBatteryLevel(adc_oneshot_unit_handle_t adc1_handle) {
     }
     gpio_set_level(VOLTAGE_DIVIDER_GPIO, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
-    int adcValue;
-    adc_oneshot_read(adc1_handle, ADC_CHANNEL_1, &adcValue);
     float voltage = adcValue * (3.3 / 4095.0) * 2;
     gpio_set_level(VOLTAGE_DIVIDER_GPIO, 0);
     vTaskDelay(pdMS_TO_TICKS(ADC_POWER_DOWN_DELAY));
@@ -252,6 +262,7 @@ float ESP32Base::checkBatteryLevel(adc_oneshot_unit_handle_t adc1_handle) {
 float ESP32Base::map(float x, float in_min, float in_max, float out_min, float out_max) {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
+
 
 
 // it appends into the NVS(key and value)
@@ -326,6 +337,11 @@ private:
 };
 
 
+std::vector<std::string> ESP32DerivedClass::bmp180Data;
+std::vector<std::string> ESP32DerivedClass::dht22Data;
+std::vector<std::string> ESP32DerivedClass::soilMoistureData;
+std::vector<std::string> ESP32DerivedClass::ky037Data;
+
 void ESP32DerivedClass::readSensorData() {
     std::vector<SensorInfo> sensorList = getSensorsFromFile("sensors.txt"); 
     for (const auto& sensor : sensorList) {
@@ -393,18 +409,15 @@ void ESP32DerivedClass::readDHT22() {
 
 // ADC1_CHANNEL_0(GPIO 36) | VCC e GND
 void ESP32DerivedClass::readSoilMoisture() {
-    // Initialize the sensor (if not already initialized)
-    yl69_setup(ADC_PIN);
-    
-    // Read the raw ADC value
-    uint32_t adcValue = yl69_read();
-    
-    // Normalize the ADC value to a percentage
+    yl69_setup(ADC_CHANNEL_0);
+
+    uint32_t adcValue = yl69_read(adc_handle);
+
     uint32_t moisture = yl69_normalization(adcValue);
 
-    // Format and send the data
     formatData("SoilMoisture", static_cast<float>(moisture));
 }
+
 
 
 /* PARA O MICROFONE QUE VAI CAPTURAR O SOM*/
@@ -470,30 +483,22 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     nvs_close(nvsHandle);
 }
 
-// std::vector<std::string> ESP32DerivedClass::bmp180Data;
-// std::vector<std::string> ESP32DerivedClass::dht22Data;
-// std::vector<std::string> ESP32DerivedClass::soilMoistureData;
-// std::vector<std::string> ESP32DerivedClass::ky037Data;
-void initADC(adc_oneshot_unit_handle_t* adc1_handle) {
-    adc_oneshot_unit_init_cfg_t init_config1 = {
+void initADC() {
+    adc_oneshot_unit_init_cfg_t init_config = {
         .unit_id = ADC_UNIT_1,
-        .clk_src = ADC_RTC_CLK_SRC_DEFAULT,
-        .ulp_mode = ADC_ULP_MODE_DISABLE
+        // Initialize other members if necessary
+        .clk_src = ADC_RTC_CLK_SRC_DEFAULT, // Initialize missing fields
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
     };
-    esp_err_t ret = adc_oneshot_new_unit(&init_config1, adc1_handle);
-    if (ret != ESP_OK) {
-        ESP_LOGE("initADC", "Failed to initialize ADC unit: %s", esp_err_to_name(ret));
-        return;
-    }
-    adc_oneshot_chan_cfg_t config = {
-        .atten = ADC_ATTEN_DB_12,
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
+
+    adc_oneshot_chan_cfg_t chan_config = {
+        .atten = ADC_ATTEN_DB_12, // Replace deprecated ADC_ATTEN_DB_11
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
-    ret = adc_oneshot_config_channel(*adc1_handle, ADC_CHANNEL_0, &config);
-    if (ret != ESP_OK) {
-        ESP_LOGE("initADC", "Failed to configure ADC channel: %s", esp_err_to_name(ret));
-    }
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_0, &chan_config));
 }
+
 
 
 
@@ -720,8 +725,13 @@ bool checkESPNowConnection(uint8_t *targetMac) {
     return espNowConnected;
 }
 
-void onResponseReceived(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    std::string response((char*)data, data_len);
+void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len) {
+    // Get the MAC address from recv_info
+    const uint8_t *mac_addr = recv_info->src_addr;
+
+    // Process the received data
+    std::string response(reinterpret_cast<const char*>(data), data_len);
+
     if (awaitingResponse && response == "YES") {
         ESP_LOGI(LOG_TAG, "Received 'YES' from: %02x:%02x:%02x:%02x:%02x:%02x",
             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -732,6 +742,7 @@ void onResponseReceived(const uint8_t *mac_addr, const uint8_t *data, int data_l
         ESP_LOGW(LOG_TAG, "Received unexpected response: %s", response.c_str());
     }
 }
+
 
 // FIM DO AVALIAR !!!
 
@@ -767,8 +778,7 @@ extern "C" void app_main() {
         ESP_LOGE("app_main", "No sensors found in the file.");
     }
 
-    adc_oneshot_unit_handle_t adc1_handle;
-    initADC(&adc1_handle);
+    initADC();
 
     ESP32DerivedClass esp32;
 
@@ -796,7 +806,7 @@ extern "C" void app_main() {
         }
     } else {
         // Check battery level
-        float batteryLevel = esp32.checkBatteryLevel(adc1_handle);
+        float batteryLevel = esp32.checkBatteryLevel(adc_handle);
         if (batteryLevel > 20.0) {
             ESP_LOGI("Main", "Battery level sufficient. Reading sensor data.");
             esp32.readSensorData();

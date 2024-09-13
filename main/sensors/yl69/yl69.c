@@ -4,42 +4,37 @@
  */
 
 #include "yl69.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_log.h"
 
-#include "driver/gpio.h"
-#include "driver/adc.h"
+static adc_channel_t channel;
+static const char *TAG = "YL69";
 
-#include "esp_adc_cal.h"
-
-
-static adc1_channel_t channel;
-static esp_adc_cal_characteristics_t *adc_chars;
-
-static const adc_unit_t unit = ADC_UNIT_1;
-static const adc_atten_t attenuation = ADC_ATTEN_DB_11;
-
-
-void yl69_setup(adc1_channel_t _channel) {
+void yl69_setup(adc_channel_t _channel) {
     channel = _channel;
-    //Configure ADC
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(channel, attenuation);
-    //Characterize ADC
-    adc_chars = calloc(1, sizeof(esp_adc_cal_characteristics_t));
-    esp_adc_cal_characterize(unit, attenuation, ADC_WIDTH_BIT_12, DEFAULT_VREF, adc_chars);
+    // ADC initialization happens elsewhere
 }
 
-uint32_t yl69_read() {
-    uint32_t adc_reading = 0;
-    //Multisampling
+uint32_t yl69_read(adc_oneshot_unit_handle_t adc_handle) {
+    int adc_reading = 0;
+    esp_err_t err;
+
     for (int i = 0; i < NO_OF_SAMPLES; i++) {
-        adc_reading += adc1_get_raw((adc1_channel_t)channel);
+        int raw;
+        err = adc_oneshot_read(adc_handle, channel, &raw);
+        if (err == ESP_OK) {
+            adc_reading += raw;
+        } else {
+            ESP_LOGE(TAG, "ADC reading failed: %s", esp_err_to_name(err));
+            return 0;
+        }
     }
     adc_reading /= NO_OF_SAMPLES;
-    //Convert adc_reading to voltage in mV
-    // uint32_t voltage = esp_adc_cal_raw_to_voltage(adc_reading, adc_chars);
-    return adc_reading;
+
+    return (uint32_t)adc_reading;
 }
 
 uint32_t yl69_normalization(uint32_t value_t) {
     return (value_t * 100) / VALUE_MAX;
 }
+
