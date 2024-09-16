@@ -47,7 +47,7 @@ extern "C" {
 
 // DHT22
 #define DHT_TYPE_DHT22 22
-#define DHT_GPIO_PIN GPIO_NUM_4 
+#define DHT_GPIO_PIN GPIO_NUM_4
 
 
 const char* LOG_TAG = "DATA-GETTER";
@@ -165,7 +165,7 @@ struct SensorData {
     float value;            // The data value from the sensor
 };
 
-// Function to split a string by a delimiter (e.g., comma)
+// // Function to split a string by a delimiter (e.g., comma)
 std::vector<std::string> splitString(const std::string &str, char delimiter) {
     std::vector<std::string> tokens;
     std::stringstream ss(str);
@@ -177,38 +177,48 @@ std::vector<std::string> splitString(const std::string &str, char delimiter) {
     //Output: ["sensor_1", "BMP180"]
 }
 
-// Function to read sensors from the text file
-std::vector<SensorInfo> getSensorsFromFile(const char* filename) {
-    std::vector<SensorInfo> sensorList;
-    std::ifstream file(filename);
+// // Function to read sensors from the text file
+// std::vector<SensorInfo> getSensorsFromFile(const char* filename) {
+//     std::vector<SensorInfo> sensorList;
+//     std::ifstream file(filename);
 
-    if (!file.is_open()) {
-        ESP_LOGE("getSensorsFromFile", "Failed to open file: %s", filename);
-        return sensorList;
-    }
+//     if (!file.is_open()) {
+//         ESP_LOGE("getSensorsFromFile", "Failed to open file: %s", filename);
+//         return sensorList;
+//     }
 
-    std::string line;
-    while (std::getline(file, line)) {
-        std::vector<std::string> sensorData = splitString(line, ',');
-        if (sensorData.size() == 2) { // Ensure the line has all 2 components (name and type)
-            SensorInfo sensor;
-            sensor.id = sensorData[0];
-            sensor.name = sensorData[1];
-            sensorList.push_back(sensor);
-        } else {
-            ESP_LOGE("getSensorsFromFile", "Incorrect format in line: %s", line.c_str());
-        }
-    }
+//     std::string line;
+//     while (std::getline(file, line)) {
+//         std::vector<std::string> sensorData = splitString(line, ',');
+//         if (sensorData.size() == 2) { // Ensure the line has all 2 components (name and type)
+//             SensorInfo sensor;
+//             sensor.id = sensorData[0];
+//             sensor.name = sensorData[1];
+//             sensorList.push_back(sensor);
+//         } else {
+//             ESP_LOGE("getSensorsFromFile", "Incorrect format in line: %s", line.c_str());
+//         }
+//     }
 
-    file.close();
+//     file.close();
+//     return sensorList;
+
+//     /* Output: [
+//         { "sensor_1", "BMP180" },
+//         { "sensor_2", "DHT22" },
+//         ...
+//     ]*/
+// }
+std::vector<SensorInfo> getSensorsList() {
+    std::vector<SensorInfo> sensorList = {
+        {"sensor_1", "BMP180"},
+        //{"sensor_2", "DHT22"}
+        //{"sensor_3", "SoilMoisture"},
+        //{"sensor_4", "KY037"}
+    };
     return sensorList;
-
-    /* Output: [
-        { "sensor_1", "BMP180" },
-        { "sensor_2", "DHT22" },
-        ...
-    ]*/
 }
+
 
 
 // just to LOG the information about the sensors
@@ -254,8 +264,8 @@ float ESP32Base::checkBatteryLevel(adc_oneshot_unit_handle_t adc1_handle) {
     float batteryLevel = map(voltage, 3.0, 4.2, 0, 100);
     if (batteryLevel > 100) batteryLevel = 100;
     else if (batteryLevel < 0) batteryLevel = 0;
-    ESP_LOGI("ESP32Base", "Battery Level: %.2f%%", batteryLevel);
     batteryLevel=80;
+    ESP_LOGI("ESP32Base", "Battery Level: %.2f%%", batteryLevel);
     return batteryLevel;
 }
 
@@ -269,43 +279,38 @@ float ESP32Base::map(float x, float in_min, float in_max, float out_min, float o
 // storeDataInNVS("temperature_sensor", 26.2);
 // NVS Storage -> Key: "temperature_sensor" Value: "25.6,26.2"
 void storeDataInNVS(const char* sensorName, float data) {
+    // Open NVS namespace in read/write mode
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("sensor_data", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error opening NVS");
+        ESP_LOGE("NVS", "Error opening NVS: %s", esp_err_to_name(err));
         return;
     }
 
-    // First, retrieve existing data for this sensor (if any)
-    size_t required_size = 0;
-    err = nvs_get_str(my_handle, sensorName, NULL, &required_size);
+    // Store the data as a string
+    char value_str[32];
+    snprintf(value_str, sizeof(value_str), "%.2f", data);
     
-    std::string newData;
-    if (err == ESP_OK && required_size > 0) {
-        std::vector<char> value_buf(required_size);
-        err = nvs_get_str(my_handle, sensorName, value_buf.data(), &required_size);
-        
-        // Append the new data to the existing data
-        newData = std::string(value_buf.data()) + "," + std::to_string(data);
-    } else {
-        // If no existing data, start fresh
-        newData = std::to_string(data);
-    }
-
-    // Store the updated data
-    err = nvs_set_str(my_handle, sensorName, newData.c_str());
+    // Set data in the NVS under sensorName
+    err = nvs_set_str(my_handle, sensorName, value_str);
     if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error writing to NVS");
+        ESP_LOGE("NVS", "Error writing to NVS: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI("NVS", "Sensor data saved: %s = %s", sensorName, value_str);
     }
 
-    // Commit the changes
+    // Commit the changes to NVS
     err = nvs_commit(my_handle);
     if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error committing to NVS");
+        ESP_LOGE("NVS", "Error committing to NVS: %s", esp_err_to_name(err));
     }
 
+    // Close NVS handle
     nvs_close(my_handle);
 }
+
+
+
 
 
 
@@ -343,7 +348,8 @@ std::vector<std::string> ESP32DerivedClass::soilMoistureData;
 std::vector<std::string> ESP32DerivedClass::ky037Data;
 
 void ESP32DerivedClass::readSensorData() {
-    std::vector<SensorInfo> sensorList = getSensorsFromFile("sensors.txt"); 
+    //std::vector<SensorInfo> sensorList = getSensorsFromFile("sensors.txt"); 
+    std::vector<SensorInfo> sensorList = getSensorsList();
     for (const auto& sensor : sensorList) {
         ESP_LOGI("Sensor Info", "ID: %s, Name: %s", sensor.id.c_str(), sensor.name.c_str());
 
@@ -371,14 +377,18 @@ void ESP32DerivedClass::readBMP180() {
     if (bmp180_init(GPIO_NUM_21, GPIO_NUM_22) == ESP_OK) {
         // Read temperature
         if (bmp180_read_temperature(&temperature) == ESP_OK) {
-            formatData("BMP180_Temperature", temperature);
+            formatData("BMP180_T", temperature);
+            ESP_LOGI("BMP180", "Temperature in Celsius");
+
         } else {
             ESP_LOGE("BMP180", "Failed to read temperature");
         }
 
         // Read pressure
         if (bmp180_read_pressure(&pressure) == ESP_OK) {
-            formatData("BMP180_Pressure", pressure);
+            formatData("BMP180_P", pressure);
+            ESP_LOGI("BMP180", "Barometric pressure in Pascal, normal atm is 1000 to 1020 hPa(hectopascal)");
+
         } else {
             ESP_LOGE("BMP180", "Failed to read pressure");
         }
@@ -391,7 +401,9 @@ void ESP32DerivedClass::readBMP180() {
 // DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
 void ESP32DerivedClass::readDHT22() {
     // Set the GPIO pin if not already set
-    setDHTgpio(DHT_GPIO_PIN); // DHT_GPIO_PIN should be defined, e.g., GPIO_NUM_4
+    //setDHTgpio(DHT_GPIO_PIN); // DHT_GPIO_PIN should be defined, e.g., GPIO_NUM_4
+
+    //vTaskDelay(pdMS_TO_TICKS(10000));  // Add 10 seconds delay to allow the sensor to stabilize
 
     int result = readDHT();
     
@@ -456,8 +468,7 @@ void ESP32DerivedClass::formatData(const std::string& sensorName, float sensorVa
     saveDataToNVS(sensorName, formattedData);
 }
 
-
-void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::string& sensorData) {
+void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::string& newSensorData) {
     nvs_handle_t nvsHandle;
     esp_err_t err = nvs_open("sensor_storage", NVS_READWRITE, &nvsHandle);
     if (err != ESP_OK) {
@@ -465,12 +476,28 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
         return;
     }
 
-    // Save sensor data
-    err = nvs_set_str(nvsHandle, sensorName.c_str(), sensorData.c_str());
+    // First, retrieve the existing data for this sensor (if any)
+    size_t required_size = 0;
+    err = nvs_get_str(nvsHandle, sensorName.c_str(), NULL, &required_size);
+    
+    std::string updatedData;
+    if (err == ESP_OK && required_size > 0) {
+        std::vector<char> existingData(required_size);
+        err = nvs_get_str(nvsHandle, sensorName.c_str(), existingData.data(), &required_size);
+        
+        // Append the new data to the existing data
+        updatedData = std::string(existingData.data()) + "," + newSensorData;
+    } else {
+        // If no existing data, start fresh
+        updatedData = newSensorData;
+    }
+
+    // Save the updated data
+    err = nvs_set_str(nvsHandle, sensorName.c_str(), updatedData.c_str());
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to write to NVS: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI("NVS", "Sensor data saved: %s", sensorData.c_str());
+        ESP_LOGI("NVS", "Sensor data appended: %s", updatedData.c_str());
     }
 
     // Commit the changes to NVS
@@ -482,6 +509,7 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     // Close NVS handle
     nvs_close(nvsHandle);
 }
+
 
 void initADC() {
     adc_oneshot_unit_init_cfg_t init_config = {
@@ -749,7 +777,7 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
 // Para verificar se há dados no NVS, pois se não há, não faz sentido mandar para o Drone.
 bool hasValidDataInNVS() {
     nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("sensor_data", NVS_READONLY, &my_handle);
+    esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &my_handle);
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Error opening NVS");
         return false;
@@ -768,10 +796,24 @@ bool hasValidDataInNVS() {
 }
 const char *tag = "DEEP_SLEEP";
 
-extern "C" void app_main() {
-    const char* filename = "sensors.txt";
-    std::vector<SensorInfo> sensors = getSensorsFromFile(filename);
 
+
+void initNVS() {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated or has a new version, erase it and initialize again
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+}
+
+extern "C" void app_main() {
+    // const char* filename = "sensors.txt";
+    // std::vector<SensorInfo> sensors = getSensorsFromFile(filename);
+    
+    initNVS();
+    std::vector<SensorInfo> sensors = getSensorsList();  // Use the new function to get the sensor list
     if (!sensors.empty()) {
         displaySensors(sensors); // Display sensor info for debugging/logging
     } else {
@@ -791,7 +833,7 @@ extern "C" void app_main() {
 
     // Register the receive callback
     esp_now_register_recv_cb(onResponseReceived);
-
+    //initNVS();  // Ensure NVS is initialized
     // Main logic
     // Try to connect to the drone
     if (checkESPNowConnection(macAddressDrone) && hasValidDataInNVS()) {

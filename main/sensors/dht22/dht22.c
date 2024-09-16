@@ -136,7 +136,7 @@ uint8_t bitInx = 7;
 
 	// pull down for 3 ms for a smooth and nice wake up
 	gpio_set_level( DHTgpio, 0 );
-	esp_rom_delay_us( 3000 );
+	esp_rom_delay_us( 15000 );
 
 	// pull up for 25 us for a gentile asking for data
 	gpio_set_level( DHTgpio, 1 );
