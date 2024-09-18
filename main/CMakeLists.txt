@@ -9,11 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 idf_component_register(SRCS "general_data_getter.cpp"
                        "sensors/bmp180/bmp180.c"
-                       "sensors/dht22/dht22.c"
+                       "sensors/dht11/dht11.c"
                        "sensors/yl69/yl69.c"
                        "sensors/acoustic/acoustic.c"
                        INCLUDE_DIRS "sensors/bmp180"
-                                    "sensors/dht22"
+                                    "sensors/dht11"
                                     "sensors/yl69"
                                     "sensors/acoustic")
 

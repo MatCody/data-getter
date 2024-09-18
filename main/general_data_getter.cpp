@@ -15,7 +15,7 @@ extern "C" {
 
     // SENSORS headers
     #include "sensors/bmp180/bmp180.h"
-    #include "sensors/dht22/dht22.h"
+    #include "sensors/dht11/dht11.h"
     #include "sensors/yl69/yl69.h"
     #include "sensors/acoustic/acoustic.h"
     
@@ -211,8 +211,8 @@ std::vector<std::string> splitString(const std::string &str, char delimiter) {
 // }
 std::vector<SensorInfo> getSensorsList() {
     std::vector<SensorInfo> sensorList = {
-        {"sensor_1", "BMP180"},
-        //{"sensor_2", "DHT22"}
+        //{"sensor_1", "BMP180"},
+        {"sensor_2", "DHT11"},
         //{"sensor_3", "SoilMoisture"},
         //{"sensor_4", "KY037"}
     };
@@ -330,20 +330,20 @@ public:
 private:
     // Static member variables
     static std::vector<std::string> bmp180Data;
-    static std::vector<std::string> dht22Data;
+    static std::vector<std::string> dht11Data;
     static std::vector<std::string> soilMoistureData;
     static std::vector<std::string> ky037Data;
 
     // Sensor read functions
     void readBMP180();
-    void readDHT22();
+    void readDHT11();
     void readSoilMoisture();
     void readKY037();
 };
 
 
 std::vector<std::string> ESP32DerivedClass::bmp180Data;
-std::vector<std::string> ESP32DerivedClass::dht22Data;
+std::vector<std::string> ESP32DerivedClass::dht11Data;
 std::vector<std::string> ESP32DerivedClass::soilMoistureData;
 std::vector<std::string> ESP32DerivedClass::ky037Data;
 
@@ -355,8 +355,8 @@ void ESP32DerivedClass::readSensorData() {
 
         if (sensor.name == "BMP180") {
             readBMP180();
-        } else if (sensor.name == "DHT22") {
-            readDHT22();
+        } else if (sensor.name == "DHT11") {
+            readDHT11();
         } else if (sensor.name == "SoilMoisture") {
             readSoilMoisture();
         } else if (sensor.name == "KY037") {
@@ -399,24 +399,42 @@ void ESP32DerivedClass::readBMP180() {
 
 
 // DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
-void ESP32DerivedClass::readDHT22() {
-    // Set the GPIO pin if not already set
-    //setDHTgpio(DHT_GPIO_PIN); // DHT_GPIO_PIN should be defined, e.g., GPIO_NUM_4
+// DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
+void ESP32DerivedClass::readDHT11() {
+    // Initialize DHT11 with the specified GPIO pin
+    DHT11_init(DHT_GPIO_PIN);
 
-    //vTaskDelay(pdMS_TO_TICKS(10000));  // Add 10 seconds delay to allow the sensor to stabilize
+    // Delay to allow the sensor to stabilize
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
-    int result = readDHT();
-    
-    if (result == DHT_OK) {
-        float temp = getTemperature();
-        float hum = getHumidity();
-        formatData("DHT22_Temperature", temp);
-        formatData("DHT22_Humidity", hum);
-        ESP_LOGI("DHT22", "Temperature: %.1f°C, Humidity: %.1f%%", temp, hum);
+    // Read data from the DHT11 sensor
+    struct dht11_reading result = DHT11_read();
+
+    // Check the status of the reading
+    if (result.status == DHT11_OK) {
+        // Successful read
+        float temp = result.temperature;
+        float hum = result.humidity;
+
+        // Format and log the data
+        formatData("DHT11_T", temp);
+        formatData("DHT11_H", hum);
+        ESP_LOGI("DHT11", "Temperature: %.1f°C, Humidity: %.1f%%", temp, hum);
+    } else if (result.status == DHT11_TIMEOUT_ERROR) {
+        // Timeout error
+        ESP_LOGE("DHT11", "Timeout error reading from DHT11 sensor.");
+    } else if (result.status == DHT11_CRC_ERROR) {
+        // Checksum error
+        ESP_LOGE("DHT11", "Checksum error reading from DHT11 sensor.");
     } else {
-        errorHandler(result);
+        // Unknown error
+        ESP_LOGE("DHT11", "Unknown error reading from DHT11 sensor.");
     }
 }
+
+
+
+
 
 
 // ADC1_CHANNEL_0(GPIO 36) | VCC e GND
@@ -456,8 +474,8 @@ void ESP32DerivedClass::formatData(const std::string& sensorName, float sensorVa
     // Append data to corresponding sensor vector
     if (sensorName == "BMP180") {
         bmp180Data.push_back(formattedData);
-    } else if (sensorName == "DHT22") {
-        dht22Data.push_back(formattedData);
+    } else if (sensorName == "DHT11") {
+        dht11Data.push_back(formattedData);
     } else if (sensorName == "SoilMoisture") {
         soilMoistureData.push_back(formattedData);
     } else if (sensorName == "KY037") {
@@ -613,7 +631,7 @@ std::string serializeSensorData(const std::vector<SensorData>& sensorDataList) {
     serializedData += "}";
 
     return serializedData;
-    // Example output: {"BMP180":[1013.25, 1014.35], "DHT22":[24.5, 25.0]}
+    // Example output: {"BMP180":[1013.25, 1014.35], "DHT11":[24.5, 25.0]}
 }
 
 
@@ -679,7 +697,7 @@ esp_err_t eraseAllDataFromNVS() {
 
     // // Reset all sensor data vectors
     // ESP32DerivedClass::bmp180Data.clear();
-    // ESP32DerivedClass::dht22Data.clear();
+    // ESP32DerivedClass::DHT11Data.clear();
     // ESP32DerivedClass::soilMoistureData.clear();
     // ESP32DerivedClass::ky037Data.clear();
 
