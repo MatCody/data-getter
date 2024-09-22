@@ -267,7 +267,7 @@ esp_err_t bmp180_read_pressure(uint32_t* pressure)
     return err;
 }
 
-
+// Reference pressure of João Pessoa is 1015 hPa
 esp_err_t bmp180_read_altitude(uint32_t reference_pressure, float* altitude)
 {
     uint32_t absolute_pressure;

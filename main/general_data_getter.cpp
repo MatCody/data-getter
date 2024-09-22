@@ -18,12 +18,15 @@ extern "C" {
     #include "sensors/dht11/dht11.h"
     #include "sensors/yl69/yl69.h"
     #include "sensors/acoustic/acoustic.h"
-    
 
     // NVS headers
     #include "nvs_flash.h"
     #include "nvs.h"
     #include "encrypt.h"
+
+    #include <inttypes.h>  // Add this to the top of your file
+    #include "esp_timer.h"
+
 
 }
 
@@ -49,61 +52,54 @@ extern "C" {
 #define DHT_TYPE_DHT22 22
 #define DHT_GPIO_PIN GPIO_NUM_4
 
+// records into the NVS
+#define MAX_RECORDS 10  // Define the maximum number of records to store
+#define RECORD_KEY_PREFIX "record_"  // Prefix for NVS keys
+#define NVS_INDEX_KEY "nvs_index"  // Key for storing the current write index
 
 const char* LOG_TAG = "DATA-GETTER";
 
-uint8_t macAddressDrone[6] = {0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6}; // DEPOIS MUDAR, PARA A ESP DO DRONE
+uint8_t macAddressDrone[6] = {0xa0, 0xb7, 0x65, 0x61, 0x58, 0x30}; // DEPOIS MUDAR, PARA A ESP DO DRONE
 
 bool awaitingResponse = false;
 
 adc_oneshot_unit_handle_t adc_handle = NULL;
 
+bool auhReceived = false;
+bool espNowMessageReceived = false;
 
+void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status);
+void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len);
 
-// Function to initialize Wi-Fi in station mode (required for ESP-NOW)
-void initWiFi() {
-    ESP_LOGI(LOG_TAG_ESP_NOW, "Initializing Wi-Fi...");
-
-    // Initialize the Wi-Fi stack in station mode
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to initialize Wi-Fi: %s", esp_err_to_name(ret));
-        return;
+void initNVS() {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated or has a new version, erase it and initialize again
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
-
-    ret = esp_wifi_set_mode(WIFI_MODE_STA);  // Set Wi-Fi to station mode
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to set Wi-Fi mode: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    ret = esp_wifi_start();  // Start the Wi-Fi
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to start Wi-Fi: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    ESP_LOGI(LOG_TAG_ESP_NOW, "Wi-Fi initialized in station mode.");
+    ESP_ERROR_CHECK(ret);
 }
 
-void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    if (status == ESP_NOW_SEND_SUCCESS) {
-        ESP_LOGI(LOG_TAG_ESP_NOW, "Message sent successfully to: %02x:%02x:%02x:%02x:%02x:%02x",
-                 mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-    } else {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to send message to: %02x:%02x:%02x:%02x:%02x:%02x",
-                 mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-    }
+void initADC() {
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+        // Initialize other members if necessary
+        .clk_src = ADC_RTC_CLK_SRC_DEFAULT, // Initialize missing fields
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
+
+    adc_oneshot_chan_cfg_t chan_config = {
+        .atten = ADC_ATTEN_DB_12, // Replace deprecated ADC_ATTEN_DB_11
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_0, &chan_config));
 }
 
-
-void onResponseReceived(const esp_now_recv_info_t* info, const uint8_t* data, int len);
-
-// Main initialization function for ESP-NOW
 void initESPNow() {
     // Initialize NVS (non-volatile storage) to store Wi-Fi settings
-    esp_err_t ret; // Declare ret once
+    esp_err_t ret;
 
     ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -113,7 +109,7 @@ void initESPNow() {
     ESP_ERROR_CHECK(ret);
 
     // Initialize Wi-Fi in station mode
-    initWiFi();
+    //initWiFi();
 
     // Initialize ESP-NOW
     ret = esp_now_init();
@@ -148,10 +144,41 @@ void initESPNow() {
     ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW setup complete.");
 }
 
-// 10 - 12 KB of data into the NVS
-// Flowchart
-// Deep Sleep function, Check battery level function, Cryptograph data
-// Handle different types of sensors (each one with a unique driver) -> use a type of menu
+
+void initWiFi() {
+    ESP_LOGI(LOG_TAG_ESP_NOW, "Initializing Wi-Fi...");
+
+    // Initialize the network interface (must be called before esp_wifi_init)
+    ESP_ERROR_CHECK(esp_netif_init());  // Initialize TCP/IP stack
+
+    // Initialize the default event loop (required for Wi-Fi events)
+    ESP_ERROR_CHECK(esp_event_loop_create_default());  // Ensure the event loop is set up
+
+    // Initialize the Wi-Fi stack in station mode
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to initialize Wi-Fi: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // Set Wi-Fi to station mode
+    ret = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to set Wi-Fi mode: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // Start the Wi-Fi
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to start Wi-Fi: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(LOG_TAG_ESP_NOW, "Wi-Fi initialized in station mode.");
+}
+
 
 // TXT FILE <start>
 // Structure to hold sensor data
@@ -164,6 +191,58 @@ struct SensorData {
     std::string sensorName; // Name of the sensor
     float value;            // The data value from the sensor
 };
+// Timer handles
+esp_timer_handle_t auhWaitTimer = NULL;
+bool auhWaitTimerExpired = false;
+void auhWaitTimerCallback(void* arg) {
+    auhWaitTimerExpired = true;
+    ESP_LOGW(LOG_TAG, "AUH? wait timer expired.");
+}
+
+void startAUHWaitTimer() {
+    auhWaitTimerExpired = false;
+
+    // Create and start the timer
+    esp_timer_create_args_t timer_args = {
+        .callback = &auhWaitTimerCallback,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "auhWaitTimer",
+        .skip_unhandled_events = false  // Initialize to false explicitly
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &auhWaitTimer));
+    ESP_ERROR_CHECK(esp_timer_start_once(auhWaitTimer, 5000000));  // Wait for 5 seconds (in microseconds)
+}
+
+// Para verificar se há dados no NVS, pois se não há, não faz sentido mandar para o Drone.
+
+const char *tag = "DEEP_SLEEP"; 
+
+// Function to initialize Wi-Fi in station mode (required for ESP-NOW)
+
+
+void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status) {
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        ESP_LOGI("ESP-NOW", "Send success to %02X:%02X:%02X:%02X:%02X:%02X",
+                 mac_addr[0], mac_addr[1], mac_addr[2],
+                 mac_addr[3], mac_addr[4], mac_addr[5]);
+    } else {
+        ESP_LOGE("ESP-NOW", "Send fail to %02X:%02X:%02X:%02X:%02X:%02X",
+                 mac_addr[0], mac_addr[1], mac_addr[2],
+                 mac_addr[3], mac_addr[4], mac_addr[5]);
+    }
+}
+
+// Main initialization function for ESP-NOW
+
+
+// 10 - 12 KB of data into the NVS
+// Flowchart
+// Deep Sleep function, Check battery level function, Cryptograph data
+// Handle different types of sensors (each one with a unique driver) -> use a type of menu
+
+
 
 // // Function to split a string by a delimiter (e.g., comma)
 std::vector<std::string> splitString(const std::string &str, char delimiter) {
@@ -177,49 +256,15 @@ std::vector<std::string> splitString(const std::string &str, char delimiter) {
     //Output: ["sensor_1", "BMP180"]
 }
 
-// // Function to read sensors from the text file
-// std::vector<SensorInfo> getSensorsFromFile(const char* filename) {
-//     std::vector<SensorInfo> sensorList;
-//     std::ifstream file(filename);
-
-//     if (!file.is_open()) {
-//         ESP_LOGE("getSensorsFromFile", "Failed to open file: %s", filename);
-//         return sensorList;
-//     }
-
-//     std::string line;
-//     while (std::getline(file, line)) {
-//         std::vector<std::string> sensorData = splitString(line, ',');
-//         if (sensorData.size() == 2) { // Ensure the line has all 2 components (name and type)
-//             SensorInfo sensor;
-//             sensor.id = sensorData[0];
-//             sensor.name = sensorData[1];
-//             sensorList.push_back(sensor);
-//         } else {
-//             ESP_LOGE("getSensorsFromFile", "Incorrect format in line: %s", line.c_str());
-//         }
-//     }
-
-//     file.close();
-//     return sensorList;
-
-//     /* Output: [
-//         { "sensor_1", "BMP180" },
-//         { "sensor_2", "DHT22" },
-//         ...
-//     ]*/
-// }
 std::vector<SensorInfo> getSensorsList() {
     std::vector<SensorInfo> sensorList = {
-        //{"sensor_1", "BMP180"},
+        {"sensor_1", "BMP180"},
         {"sensor_2", "DHT11"},
-        //{"sensor_3", "SoilMoisture"},
+        {"sensor_3", "SoilMoisture"},
         //{"sensor_4", "KY037"}
     };
     return sensorList;
 }
-
-
 
 // just to LOG the information about the sensors
 void displaySensors(const std::vector<SensorInfo>& sensors) {
@@ -274,59 +319,12 @@ float ESP32Base::map(float x, float in_min, float in_max, float out_min, float o
 }
 
 
-
-// it appends into the NVS(key and value)
-// storeDataInNVS("temperature_sensor", 26.2);
-// NVS Storage -> Key: "temperature_sensor" Value: "25.6,26.2"
-void storeDataInNVS(const char* sensorName, float data) {
-    // Open NVS namespace in read/write mode
-    nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("sensor_data", NVS_READWRITE, &my_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error opening NVS: %s", esp_err_to_name(err));
-        return;
-    }
-
-    // Store the data as a string
-    char value_str[32];
-    snprintf(value_str, sizeof(value_str), "%.2f", data);
-    
-    // Set data in the NVS under sensorName
-    err = nvs_set_str(my_handle, sensorName, value_str);
-    if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error writing to NVS: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI("NVS", "Sensor data saved: %s = %s", sensorName, value_str);
-    }
-
-    // Commit the changes to NVS
-    err = nvs_commit(my_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error committing to NVS: %s", esp_err_to_name(err));
-    }
-
-    // Close NVS handle
-    nvs_close(my_handle);
-}
-
-
-
-
-
-
-
-
-void formatData(const char* sensorName, float data) {
-    ESP_LOGI("SensorData", "Sensor: %s, Data: %.2f", sensorName, data);
-    storeDataInNVS(sensorName, data);  // Store sensor data in NVS
-}
-
 class ESP32DerivedClass : public ESP32Base {
 public:
     void readSensorData() override;
     void formatData(const std::string& sensorName, float sensorValue);
     void saveDataToNVS(const std::string& sensorName, const std::string& sensorData);
-
+    void readAllDataFromNVS();  
 private:
     // Static member variables
     static std::vector<std::string> bmp180Data;
@@ -340,7 +338,6 @@ private:
     void readSoilMoisture();
     void readKY037();
 };
-
 
 std::vector<std::string> ESP32DerivedClass::bmp180Data;
 std::vector<std::string> ESP32DerivedClass::dht11Data;
@@ -397,7 +394,6 @@ void ESP32DerivedClass::readBMP180() {
     }   
 }
 
-
 // DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
 // DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
 void ESP32DerivedClass::readDHT11() {
@@ -432,11 +428,6 @@ void ESP32DerivedClass::readDHT11() {
     }
 }
 
-
-
-
-
-
 // ADC1_CHANNEL_0(GPIO 36) | VCC e GND
 void ESP32DerivedClass::readSoilMoisture() {
     yl69_setup(ADC_CHANNEL_0);
@@ -447,8 +438,6 @@ void ESP32DerivedClass::readSoilMoisture() {
 
     formatData("SoilMoisture", static_cast<float>(moisture));
 }
-
-
 
 /* PARA O MICROFONE QUE VAI CAPTURAR O SOM*/
 // ADC1_CHANNEL_1(GPIO 37) | VCC e GND
@@ -466,8 +455,6 @@ void ESP32DerivedClass::readKY037() {
     // Format and send the data
     formatData("KY037", soundLevel);
 }
-
-
 
 void ESP32DerivedClass::formatData(const std::string& sensorName, float sensorValue) {
     std::string formattedData = sensorName + ": " + std::to_string(sensorValue);
@@ -494,59 +481,70 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
         return;
     }
 
-    // First, retrieve the existing data for this sensor (if any)
-    size_t required_size = 0;
-    err = nvs_get_str(nvsHandle, sensorName.c_str(), NULL, &required_size);
-    
-    std::string updatedData;
-    if (err == ESP_OK && required_size > 0) {
-        std::vector<char> existingData(required_size);
-        err = nvs_get_str(nvsHandle, sensorName.c_str(), existingData.data(), &required_size);
-        
-        // Append the new data to the existing data
-        updatedData = std::string(existingData.data()) + "," + newSensorData;
-    } else {
-        // If no existing data, start fresh
-        updatedData = newSensorData;
+    int32_t currentIndex = 0;
+    err = nvs_get_i32(nvsHandle, NVS_INDEX_KEY, &currentIndex);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        currentIndex = 0;
     }
 
-    // Save the updated data
-    err = nvs_set_str(nvsHandle, sensorName.c_str(), updatedData.c_str());
+    char key[32];
+    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Correct usage of PRIi32
+
+    err = nvs_set_str(nvsHandle, key, newSensorData.c_str());
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to write to NVS: %s", esp_err_to_name(err));
     } else {
-        ESP_LOGI("NVS", "Sensor data appended: %s", updatedData.c_str());
+        ESP_LOGI("NVS", "Sensor data saved at key: %s", key);
     }
 
-    // Commit the changes to NVS
+    currentIndex = (currentIndex + 1) % MAX_RECORDS;
+    err = nvs_set_i32(nvsHandle, NVS_INDEX_KEY, currentIndex);
+    if (err != ESP_OK) {
+        ESP_LOGE("NVS", "Failed to update NVS index: %s", esp_err_to_name(err));
+    }
+
     err = nvs_commit(nvsHandle);
     if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Failed to commit NVS changes: %s", esp_err_to_name(err));
+        ESP_LOGE("NVS", "Error committing NVS: %s", esp_err_to_name(err));
     }
 
-    // Close NVS handle
     nvs_close(nvsHandle);
 }
 
+// ! TEMPORARY
+void ESP32DerivedClass::readAllDataFromNVS() {
+    nvs_handle_t nvsHandle;
+    esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &nvsHandle);
+    if (err != ESP_OK) {
+        ESP_LOGE("NVS", "Failed to open NVS handle for reading: %s", esp_err_to_name(err));
+        return;
+    }
 
-void initADC() {
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-        // Initialize other members if necessary
-        .clk_src = ADC_RTC_CLK_SRC_DEFAULT, // Initialize missing fields
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
+    // Loop through stored records
+    for (int32_t i = 0; i < MAX_RECORDS; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, i);  // Generate key
 
-    adc_oneshot_chan_cfg_t chan_config = {
-        .atten = ADC_ATTEN_DB_12, // Replace deprecated ADC_ATTEN_DB_11
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_0, &chan_config));
+        // Get the string associated with the key
+        size_t required_size = 0;
+        err = nvs_get_str(nvsHandle, key, NULL, &required_size);
+        if (err == ESP_OK) {
+            std::vector<char> value_buf(required_size);
+            err = nvs_get_str(nvsHandle, key, value_buf.data(), &required_size);
+            if (err == ESP_OK) {
+                ESP_LOGI("NVS_READ", "Key: %s, Value: %s", key, value_buf.data());
+            } else {
+                ESP_LOGE("NVS_READ", "Failed to read value for key %s", key);
+            }
+        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGI("NVS_READ", "Key %s not found, probably empty.", key);
+        } else {
+            ESP_LOGE("NVS_READ", "Error getting string for key %s: %s", key, esp_err_to_name(err));
+        }
+    }
+
+    nvs_close(nvsHandle);
 }
-
-
-
 
 // NVS and DATA functions
 
@@ -578,7 +576,6 @@ std::vector<SensorData> getAllDataFromNVS() {
             std::vector<char> value_buf(required_size);
             err = nvs_get_str(my_handle, info.key, value_buf.data(), &required_size);
             if (err == ESP_OK) {
-                // Split the string into individual values and store them
                 std::string sensorValues = value_buf.data();
                 std::vector<std::string> values = splitString(sensorValues, ',');
 
@@ -594,12 +591,11 @@ std::vector<SensorData> getAllDataFromNVS() {
         }
 
         nvs_close(my_handle);
-        nvs_entry_next(&it);
+        nvs_entry_next(&it);  // Move to the next entry
     }
 
     return sensorDataList;
 }
-
 
 
 
@@ -633,7 +629,6 @@ std::string serializeSensorData(const std::vector<SensorData>& sensorDataList) {
     return serializedData;
     // Example output: {"BMP180":[1013.25, 1014.35], "DHT11":[24.5, 25.0]}
 }
-
 
 
 #define MAX_PAYLOAD_SIZE 250
@@ -672,7 +667,7 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
 esp_err_t eraseAllDataFromNVS() {
     // Initialize the NVS handle
     nvs_handle_t nvsHandle;
-    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvsHandle);
+    esp_err_t err = nvs_open("sensor_data", NVS_READWRITE, &nvsHandle);  // Use correct namespace
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to open NVS handle: %s", esp_err_to_name(err));
         return err;
@@ -695,15 +690,28 @@ esp_err_t eraseAllDataFromNVS() {
     // Close the NVS handle
     nvs_close(nvsHandle);
 
-    // // Reset all sensor data vectors
-    // ESP32DerivedClass::bmp180Data.clear();
-    // ESP32DerivedClass::DHT11Data.clear();
-    // ESP32DerivedClass::soilMoistureData.clear();
-    // ESP32DerivedClass::ky037Data.clear();
-
-    ESP_LOGI("NVS", "All sensor vectors cleared successfully.");
+    ESP_LOGI("NVS", "NVS erase and commit completed.");
 
     return err;
+}
+bool hasValidDataInNVS() {
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &my_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE("NVS", "Error opening NVS");
+        return false;
+    }
+
+    std::vector<SensorData> sensorDataList = getAllDataFromNVS();
+    if (sensorDataList.empty()) {
+        ESP_LOGI("NVS", "No valid sensor data found.");
+        nvs_close(my_handle);
+        return false;
+    }
+
+    nvs_close(my_handle);
+    return true;
+
 }
 
 // Global variable to track connection status on the sending ESP32
@@ -712,28 +720,50 @@ esp_err_t eraseAllDataFromNVS() {
 bool espNowConnected = false;
 
 // Callback function to handle data received via ESP-NOW | FUNÇÂO VAI FICAR NO DRONE, DEPOIS DESLOCAR
-void onDataReceive(const uint8_t *mac_addr, const uint8_t *data, int data_len) {
-    // Convert the data to a string
-    std::string receivedMessage((char*)data, data_len);
+void onDataReceive(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+    // Process the received data
+    std::string receivedData(reinterpret_cast<const char*>(data), len);
 
-    // Check if the message is "AUH?"
-    if (receivedMessage == "AUH?") {
-        ESP_LOGI(LOG_TAG, "Received 'AUH?' from: %02x:%02x:%02x:%02x:%02x:%02x",
-            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+    if (receivedData == "AUH?") {
+        ESP_LOGI("ESP-NOW", "Received 'AUH?' from the drone.");
 
         // Respond with "YES"
-        const char* responseMsg = "YES";
-        esp_err_t err = esp_now_send(mac_addr, (uint8_t*)responseMsg, strlen(responseMsg));
-        if (err != ESP_OK) {
-            ESP_LOGE(LOG_TAG, "Error sending response 'YES': %s", esp_err_to_name(err));
+        const char* response = "YES";
+        esp_err_t result = esp_now_send(recv_info->src_addr, (const uint8_t*)response, strlen(response));
+        if (result == ESP_OK) {
+            ESP_LOGI("ESP-NOW", "Sent 'YES' response to the drone.");
         } else {
-            ESP_LOGI(LOG_TAG, "Responded with 'YES' to: %02x:%02x:%02x:%02x:%02x:%02x",
-                mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+            ESP_LOGE("ESP-NOW", "Failed to send 'YES' response.");
+            return;
         }
+
+        // Proceed to send data
+        std::vector<SensorData> sensorDataList = getAllDataFromNVS();
+        for (const auto& sensorData : sensorDataList) {
+            // Convert SensorData to string format
+            std::string jsonData = sensorData.sensorName + ": " + std::to_string(sensorData.value);
+            size_t dataSize = jsonData.length();  // Get the length of the string
+
+            // Split the data into chunks if necessary (e.g., for large data)
+            for (size_t offset = 0; offset < dataSize; offset += 250) {
+                size_t sendSize = std::min(static_cast<size_t>(250), dataSize - offset);
+                result = esp_now_send(recv_info->src_addr, (const uint8_t*)jsonData.c_str() + offset, sendSize);
+                if (result != ESP_OK) {
+                    ESP_LOGE("ESP-NOW", "Failed to send data to the drone.");
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(500));  // Small delay between sends
+        }
+
+        // Erase NVS data after successful transmission
+        eraseAllDataFromNVS();
     } else {
-        ESP_LOGW(LOG_TAG, "Received unknown message: %s", receivedMessage.c_str());
+        ESP_LOGW("ESP-NOW", "Received unexpected data: %s", receivedData.c_str());
     }
 }
+
+
 
 bool checkESPNowConnection(uint8_t *targetMac) {
     awaitingResponse = true;
@@ -776,107 +806,106 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
     const uint8_t *mac_addr = recv_info->src_addr;
 
     // Process the received data
-    std::string response(reinterpret_cast<const char*>(data), data_len);
+    std::string receivedData(reinterpret_cast<const char*>(data), data_len);
 
-    if (awaitingResponse && response == "YES") {
-        ESP_LOGI(LOG_TAG, "Received 'YES' from: %02x:%02x:%02x:%02x:%02x:%02x",
-            mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+    ESP_LOGI(LOG_TAG, "Received data from: %02X:%02X:%02X:%02X:%02X:%02X - %s",
+        mac_addr[0], mac_addr[1], mac_addr[2],
+        mac_addr[3], mac_addr[4], mac_addr[5],
+        receivedData.c_str());
 
-        espNowConnected = true;
-        awaitingResponse = false;
+    if (receivedData == "AUH?") {
+        ESP_LOGI(LOG_TAG, "Received 'AUH?' from the drone. Sending 'YES' response.");
+
+        // Prepare the response
+        const char* response = "YES";
+
+        // Send the response back via ESP-NOW
+        esp_err_t result = esp_now_send(mac_addr, (const uint8_t*)response, strlen(response));
+        if (result == ESP_OK) {
+            ESP_LOGI(LOG_TAG, "Sent 'YES' response to the drone.");
+
+            // Set the flag to indicate that we received the message and responded
+            espNowMessageReceived = true;
+
+            // Now proceed to send the data to the drone
+            if (hasValidDataInNVS()) {
+                // Send data to the drone
+                esp_err_t err = sendNVSDataToDrone(mac_addr);
+                if (err == ESP_OK) {
+                    // Erase NVS data after successful transmission
+                    eraseAllDataFromNVS();
+                    ESP_LOGI(LOG_TAG, "Data sent successfully to the drone.");
+                } else {
+                    ESP_LOGE(LOG_TAG, "Failed to send data to the drone.");
+                }
+            } else {
+                ESP_LOGW(LOG_TAG, "No valid data in NVS to send.");
+            }
+        } else {
+            ESP_LOGE(LOG_TAG, "Failed to send 'YES' response.");
+        }
     } else {
-        ESP_LOGW(LOG_TAG, "Received unexpected response: %s", response.c_str());
+        ESP_LOGW(LOG_TAG, "Received unexpected data: %s", receivedData.c_str());
     }
 }
-
 
 // FIM DO AVALIAR !!!
 
-// Para verificar se há dados no NVS, pois se não há, não faz sentido mandar para o Drone.
-bool hasValidDataInNVS() {
-    nvs_handle_t my_handle;
-    esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &my_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE("NVS", "Error opening NVS");
-        return false;
-    }
-
-    std::vector<SensorData> sensorDataList = getAllDataFromNVS();
-    if (sensorDataList.empty()) {
-        ESP_LOGI("NVS", "No valid sensor data found.");
-        nvs_close(my_handle);
-        return false;
-    }
-
-    nvs_close(my_handle);
-    return true;
-
-}
-const char *tag = "DEEP_SLEEP";
-
-
-
-void initNVS() {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // NVS partition was truncated or has a new version, erase it and initialize again
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-}
 
 extern "C" void app_main() {
-    // const char* filename = "sensors.txt";
-    // std::vector<SensorInfo> sensors = getSensorsFromFile(filename);
-    
+    // Initialize NVS
     initNVS();
-    std::vector<SensorInfo> sensors = getSensorsList();  // Use the new function to get the sensor list
+    initADC();
+    ESP32DerivedClass esp32;
+
+    // Initialize ESP-NOW
+    initWiFi();
+    initESPNow();
+
+    // Get sensors list
+    std::vector<SensorInfo> sensors = getSensorsList();
     if (!sensors.empty()) {
-        displaySensors(sensors); // Display sensor info for debugging/logging
+        displaySensors(sensors);
     } else {
         ESP_LOGE("app_main", "No sensors found in the file.");
     }
 
-    initADC();
-
-    ESP32DerivedClass esp32;
 
     // Configuration for deep sleep
     uint64_t deepSleepDuration_us = 10 * 1000000;  // 10 seconds in microseconds
 
-    // Initialize ESP-NOW
-    initESPNow();
-    void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len);
-
     // Register the receive callback
-    esp_now_register_recv_cb(onResponseReceived);
-    //initNVS();  // Ensure NVS is initialized
-    // Main logic
-    // Try to connect to the drone
-    if (checkESPNowConnection(macAddressDrone) && hasValidDataInNVS()) {
-        // Send data to the drone
-        esp_err_t err = sendNVSDataToDrone(macAddressDrone);
-        if (err == ESP_OK) {
-            // Erase NVS data after successful transmission
-            eraseAllDataFromNVS();
-            ESP_LOGI("Main", "Data sent successfully. Entering deep sleep.");
-        } else {
-            ESP_LOGE("Main", "Failed to send data.");
-        }
-    } else {
+    esp_now_register_recv_cb(onDataReceive);
+
+    // Start AUH? wait timer
+    startAUHWaitTimer();
+
+    ESP_LOGI("Main", "Waiting for 'AUH?' message...");
+
+    // Wait until AUH? is received or timer expires
+    while (!auhReceived && !auhWaitTimerExpired) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100 ms
+    }
+
+    if (!auhReceived) {
+        ESP_LOGI("Main", "'AUH?' not received. Proceeding to check battery and read sensors.");
+
         // Check battery level
         float batteryLevel = esp32.checkBatteryLevel(adc_handle);
         if (batteryLevel > 20.0) {
             ESP_LOGI("Main", "Battery level sufficient. Reading sensor data.");
             esp32.readSensorData();
+            ESP_LOGI("Main", "Time to display");
+            vTaskDelay(pdMS_TO_TICKS(3000));  // Check every 100 ms
+            esp32.readAllDataFromNVS();
         } else {
             ESP_LOGW("Main", "Battery level low. Skipping sensor reading.");
         }
+    } else {
+        ESP_LOGI("Main", "Data sent to drone after receiving 'AUH?'.");
     }
 
     // Enter deep sleep
     ESP_LOGI("Main", "Entering deep sleep for %llu microseconds.", deepSleepDuration_us);
     esp32.deepSleep("SLEEP", deepSleepDuration_us);
 }
-
