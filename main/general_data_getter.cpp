@@ -26,6 +26,7 @@ extern "C" {
 
     #include <inttypes.h>  // Add this to the top of your file
     #include "esp_timer.h"
+    #include "cJSON.h"
 
 
 }
@@ -97,64 +98,12 @@ void initADC() {
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, ADC_CHANNEL_0, &chan_config));
 }
 
-void initESPNow() {
-    // Initialize NVS (non-volatile storage) to store Wi-Fi settings
-    esp_err_t ret;
-
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    // Initialize Wi-Fi in station mode
-    //initWiFi();
-
-    // Initialize ESP-NOW
-    ret = esp_now_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "ESP-NOW initialization failed: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW initialized successfully.");
-
-    // Set primary Wi-Fi channel for ESP-NOW (optional)
-    ret = esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to set Wi-Fi channel: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    // Register callback for sending data
-    ret = esp_now_register_send_cb(onESPNowSend);
-    if (ret != ESP_OK) {
-        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to register send callback: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    // Optionally, you can also register a callback for receiving data
-    ret = esp_now_register_recv_cb(onResponseReceived);
-    if (ret != ESP_OK) {
-        ESP_LOGE("ESP-NOW", "Failed to register receive callback: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW setup complete.");
-}
-
-
 void initWiFi() {
     ESP_LOGI(LOG_TAG_ESP_NOW, "Initializing Wi-Fi...");
 
-    // Initialize the network interface (must be called before esp_wifi_init)
-    ESP_ERROR_CHECK(esp_netif_init());  // Initialize TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Initialize the default event loop (required for Wi-Fi events)
-    ESP_ERROR_CHECK(esp_event_loop_create_default());  // Ensure the event loop is set up
-
-    // Initialize the Wi-Fi stack in station mode
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t ret = esp_wifi_init(&cfg);
     if (ret != ESP_OK) {
@@ -162,14 +111,12 @@ void initWiFi() {
         return;
     }
 
-    // Set Wi-Fi to station mode
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
     if (ret != ESP_OK) {
         ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to set Wi-Fi mode: %s", esp_err_to_name(ret));
         return;
     }
 
-    // Start the Wi-Fi
     ret = esp_wifi_start();
     if (ret != ESP_OK) {
         ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to start Wi-Fi: %s", esp_err_to_name(ret));
@@ -178,6 +125,31 @@ void initWiFi() {
 
     ESP_LOGI(LOG_TAG_ESP_NOW, "Wi-Fi initialized in station mode.");
 }
+
+void initESPNow() {
+    esp_err_t ret = esp_now_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "ESP-NOW initialization failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW initialized successfully.");
+
+    ret = esp_now_register_send_cb(onESPNowSend);
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to register send callback: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_now_register_recv_cb(onResponseReceived);  // or onDataReceive
+    if (ret != ESP_OK) {
+        ESP_LOGE(LOG_TAG_ESP_NOW, "Failed to register receive callback: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW setup complete.");
+}
+
 
 
 // TXT FILE <start>
@@ -242,19 +214,6 @@ void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // Deep Sleep function, Check battery level function, Cryptograph data
 // Handle different types of sensors (each one with a unique driver) -> use a type of menu
 
-
-
-// // Function to split a string by a delimiter (e.g., comma)
-std::vector<std::string> splitString(const std::string &str, char delimiter) {
-    std::vector<std::string> tokens;
-    std::stringstream ss(str);
-    std::string item;
-    while (std::getline(ss, item, delimiter)) {
-        tokens.push_back(item);
-    }
-    return tokens;
-    //Output: ["sensor_1", "BMP180"]
-}
 
 std::vector<SensorInfo> getSensorsList() {
     std::vector<SensorInfo> sensorList = {
@@ -484,32 +443,34 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     int32_t currentIndex = 0;
     err = nvs_get_i32(nvsHandle, NVS_INDEX_KEY, &currentIndex);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        currentIndex = 0;
+        currentIndex = 0;  // No previous data, start at 0
     }
 
     char key[32];
-    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Correct usage of PRIi32
+    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Generates unique key for each record
 
-    err = nvs_set_str(nvsHandle, key, newSensorData.c_str());
+    err = nvs_set_str(nvsHandle, key, newSensorData.c_str());  // Save data as string
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to write to NVS: %s", esp_err_to_name(err));
     } else {
         ESP_LOGI("NVS", "Sensor data saved at key: %s", key);
     }
 
+    // Increment index and save it
     currentIndex = (currentIndex + 1) % MAX_RECORDS;
     err = nvs_set_i32(nvsHandle, NVS_INDEX_KEY, currentIndex);
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to update NVS index: %s", esp_err_to_name(err));
     }
 
-    err = nvs_commit(nvsHandle);
+    err = nvs_commit(nvsHandle);  // Commit to ensure data is stored
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Error committing NVS: %s", esp_err_to_name(err));
     }
 
     nvs_close(nvsHandle);
 }
+
 
 // ! TEMPORARY
 void ESP32DerivedClass::readAllDataFromNVS() {
@@ -552,9 +513,16 @@ void ESP32DerivedClass::readAllDataFromNVS() {
 std::vector<SensorData> getAllDataFromNVS() {
     std::vector<SensorData> sensorDataList;
     nvs_iterator_t it = NULL;
-    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, "sensor_data", NVS_TYPE_STR, &it);
+    esp_err_t err = nvs_entry_find(NVS_DEFAULT_PART_NAME, "sensor_storage", NVS_TYPE_STR, &it);
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Error finding NVS entries");
+        return sensorDataList;
+    }
+
+    nvs_handle_t my_handle;
+    err = nvs_open("sensor_storage", NVS_READONLY, &my_handle);  // Open NVS once
+    if (err != ESP_OK) {
+        ESP_LOGE("NVS", "Error opening NVS handle");
         return sensorDataList;
     }
 
@@ -562,73 +530,73 @@ std::vector<SensorData> getAllDataFromNVS() {
         nvs_entry_info_t info;
         nvs_entry_info(it, &info);
 
-        // Read the value (a comma-separated string of values)
-        nvs_handle_t my_handle;
-        err = nvs_open("sensor_data", NVS_READONLY, &my_handle);
-        if (err != ESP_OK) {
-            ESP_LOGE("NVS", "Error opening NVS handle");
-            break;
-        }
-
+        // Read the value (a string like "DHT11_T: 28.000000")
         size_t required_size = 0;
         err = nvs_get_str(my_handle, info.key, NULL, &required_size);
         if (err == ESP_OK) {
             std::vector<char> value_buf(required_size);
             err = nvs_get_str(my_handle, info.key, value_buf.data(), &required_size);
             if (err == ESP_OK) {
-                std::string sensorValues = value_buf.data();
-                std::vector<std::string> values = splitString(sensorValues, ',');
-
-                for (const std::string& valueStr : values) {
-                    SensorData sensorData;
-                    sensorData.sensorName = info.key;
-                    sensorData.value = std::stof(valueStr);
-                    sensorDataList.push_back(sensorData);
+                std::string sensorEntry = value_buf.data();
+                ESP_LOGI("NVS_READ", "Retrieved sensor entry: %s", sensorEntry.c_str());
+                
+                // Split into sensorName and sensorValue
+                size_t colonPos = sensorEntry.find(": ");
+                if (colonPos == std::string::npos) {
+                    ESP_LOGE("NVS", "Invalid format in NVS for key %s: %s", info.key, sensorEntry.c_str());
+                    continue;  // Skip invalid entries
                 }
+
+                std::string sensorName = sensorEntry.substr(0, colonPos);  // Extract sensor name
+                std::string sensorValueStr = sensorEntry.substr(colonPos + 2);  // Extract sensor value
+
+                // Convert the sensorValueStr to a float
+                char* end;
+                float sensorValue = strtof(sensorValueStr.c_str(), &end);
+                if (end == sensorValueStr.c_str() || *end != '\0') {
+                    ESP_LOGE("NVS", "Invalid float value in NVS for key %s: %s", info.key, sensorValueStr.c_str());
+                    continue;  // Skip invalid values
+                }
+
+                // Add to sensor data list
+                SensorData sensorData;
+                sensorData.sensorName = sensorName;
+                sensorData.value = sensorValue;
+                sensorDataList.push_back(sensorData);
             } else {
                 ESP_LOGE("NVS", "Error reading value for key %s", info.key);
             }
+        } else {
+            ESP_LOGE("NVS", "Error getting string size for key %s", info.key);
         }
 
-        nvs_close(my_handle);
         nvs_entry_next(&it);  // Move to the next entry
     }
 
+    nvs_close(my_handle);  // Close NVS once after the loop
     return sensorDataList;
 }
 
 
 
+
 // argument is the output of the previous function
 std::string serializeSensorData(const std::vector<SensorData>& sensorDataList) {
-    std::string serializedData = "{";
-    std::unordered_map<std::string, std::vector<float>> sensorValuesMap;
-
-    // Organize sensor data by sensor name
-    for (const auto& data : sensorDataList) {
-        sensorValuesMap[data.sensorName].push_back(data.value);
+    cJSON *root = cJSON_CreateArray();
+    for (const auto& sensorData : sensorDataList) {
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddStringToObject(item, "sensorName", sensorData.sensorName.c_str());
+        cJSON_AddNumberToObject(item, "value", sensorData.value);
+        cJSON_AddItemToArray(root, item);
     }
+    char *jsonString = cJSON_PrintUnformatted(root);
+    std::string serializedData(jsonString);
 
-    // Serialize each sensor and its associated values
-    for (const auto& entry : sensorValuesMap) {
-        serializedData += "\"" + entry.first + "\":[";
-        for (const auto& value : entry.second) {
-            serializedData += std::to_string(value) + ",";
-        }
-        // Remove the trailing comma and close the array
-        serializedData.pop_back();
-        serializedData += "],";
-    }
-
-    // Remove the last comma and close the JSON object
-    if (!sensorDataList.empty()) {
-        serializedData.pop_back();
-    }
-    serializedData += "}";
-
+    free(jsonString);
+    cJSON_Delete(root);
     return serializedData;
-    // Example output: {"BMP180":[1013.25, 1014.35], "DHT11":[24.5, 25.0]}
 }
+
 
 
 #define MAX_PAYLOAD_SIZE 250
@@ -641,33 +609,42 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
     }
 
     std::string serializedData = serializeSensorData(sensorDataList);
+    ESP_LOGI("Serialized Data", "Data to send: %s", serializedData.c_str());
+
     size_t dataLength = serializedData.length();
 
     // Split data into chunks if necessary
     for (size_t offset = 0; offset < dataLength; offset += MAX_PAYLOAD_SIZE) {
-        //size_t chunkSize = std::min(MAX_PAYLOAD_SIZE, dataLength - offset);
         size_t chunkSize = std::min(static_cast<size_t>(MAX_PAYLOAD_SIZE), dataLength - offset);
         esp_err_t err = esp_now_send(macAddress, (const uint8_t*)serializedData.c_str() + offset, chunkSize);
         if (err != ESP_OK) {
-            ESP_LOGE("ESP-NOW", "Error sending data: %s", esp_err_to_name(err));
+            ESP_LOGE("ESP-NOW", "Error sending data chunk: %s", esp_err_to_name(err));
             return err;
+        } else {
+            ESP_LOGI("ESP-NOW", "Data chunk sent successfully.");
         }
+        vTaskDelay(pdMS_TO_TICKS(100));  // Short delay between chunks
     }
 
-    // // Erase NVS data after successful transmission -> JÀ ACONTECE NO LOOP main
-    // err = eraseAllDataFromNVS();
-    // if (err != ESP_OK) {
-    //     ESP_LOGE("NVS", "Error erasing data from NVS: %s", esp_err_to_name(err));
-    // }
+    // Send "DONE" message to indicate completion
+    const char* doneMessage = "DONE";
+    esp_err_t result = esp_now_send(macAddress, (const uint8_t*)doneMessage, strlen(doneMessage));
+    if (result == ESP_OK) {
+        ESP_LOGI("ESP-NOW", "Sent 'DONE' message to the drone.");
+    } else {
+        ESP_LOGE("ESP-NOW", "Failed to send 'DONE' message: %s", esp_err_to_name(result));
+        return result;
+    }
 
     return ESP_OK;
 }
+
 
 // Function to erase all data stored in NVS and reset the vectors(sensors)
 esp_err_t eraseAllDataFromNVS() {
     // Initialize the NVS handle
     nvs_handle_t nvsHandle;
-    esp_err_t err = nvs_open("sensor_data", NVS_READWRITE, &nvsHandle);  // Use correct namespace
+    esp_err_t err = nvs_open("sensor_storage", NVS_READWRITE, &nvsHandle);  // Use correct namespace
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to open NVS handle: %s", esp_err_to_name(err));
         return err;
@@ -719,90 +696,7 @@ bool hasValidDataInNVS() {
 // AVALIAR !!!
 bool espNowConnected = false;
 
-// Callback function to handle data received via ESP-NOW | FUNÇÂO VAI FICAR NO DRONE, DEPOIS DESLOCAR
-void onDataReceive(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
-    // Process the received data
-    std::string receivedData(reinterpret_cast<const char*>(data), len);
-
-    if (receivedData == "AUH?") {
-        ESP_LOGI("ESP-NOW", "Received 'AUH?' from the drone.");
-
-        // Respond with "YES"
-        const char* response = "YES";
-        esp_err_t result = esp_now_send(recv_info->src_addr, (const uint8_t*)response, strlen(response));
-        if (result == ESP_OK) {
-            ESP_LOGI("ESP-NOW", "Sent 'YES' response to the drone.");
-        } else {
-            ESP_LOGE("ESP-NOW", "Failed to send 'YES' response.");
-            return;
-        }
-
-        // Proceed to send data
-        std::vector<SensorData> sensorDataList = getAllDataFromNVS();
-        for (const auto& sensorData : sensorDataList) {
-            // Convert SensorData to string format
-            std::string jsonData = sensorData.sensorName + ": " + std::to_string(sensorData.value);
-            size_t dataSize = jsonData.length();  // Get the length of the string
-
-            // Split the data into chunks if necessary (e.g., for large data)
-            for (size_t offset = 0; offset < dataSize; offset += 250) {
-                size_t sendSize = std::min(static_cast<size_t>(250), dataSize - offset);
-                result = esp_now_send(recv_info->src_addr, (const uint8_t*)jsonData.c_str() + offset, sendSize);
-                if (result != ESP_OK) {
-                    ESP_LOGE("ESP-NOW", "Failed to send data to the drone.");
-                }
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(500));  // Small delay between sends
-        }
-
-        // Erase NVS data after successful transmission
-        eraseAllDataFromNVS();
-    } else {
-        ESP_LOGW("ESP-NOW", "Received unexpected data: %s", receivedData.c_str());
-    }
-}
-
-
-
-bool checkESPNowConnection(uint8_t *targetMac) {
-    awaitingResponse = true;
-    espNowConnected = false;
-
-    // Send the "AUH?" request
-    const char* requestMessage = "AUH?";
-    esp_err_t result = esp_now_send(targetMac, (uint8_t*)requestMessage, strlen(requestMessage));
-    if (result != ESP_OK) {
-        ESP_LOGE(LOG_TAG, "Error sending 'AUH?' request: %s", esp_err_to_name(result));
-        awaitingResponse = false;
-        return false;
-    }
-
-    ESP_LOGI(LOG_TAG, "Sent 'AUH?' request to: %02x:%02x:%02x:%02x:%02x:%02x",
-             targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-
-    // Wait for the response with a timeout
-    int timeout = 5000; // 5 seconds
-    int elapsed = 0;
-    while (awaitingResponse && elapsed < timeout) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        elapsed += 100;
-    }
-
-    if (espNowConnected) {
-        ESP_LOGI(LOG_TAG, "ESP-NOW connection established with: %02x:%02x:%02x:%02x:%02x:%02x",
-                 targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-    } else {
-        ESP_LOGW(LOG_TAG, "No response from: %02x:%02x:%02x:%02x:%02x:%02x",
-                 targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5]);
-    }
-
-    awaitingResponse = false;
-    return espNowConnected;
-}
-
 void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len) {
-    // Get the MAC address from recv_info
     const uint8_t *mac_addr = recv_info->src_addr;
 
     // Process the received data
@@ -816,6 +710,22 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
     if (receivedData == "AUH?") {
         ESP_LOGI(LOG_TAG, "Received 'AUH?' from the drone. Sending 'YES' response.");
 
+        // Add the drone as a peer in the Sender ESP (this is where you should include the peer addition code)
+        esp_now_peer_info_t peerInfo = {};
+        memcpy(peerInfo.peer_addr, mac_addr, ESP_NOW_ETH_ALEN);  // Use the drone's MAC address
+        peerInfo.channel = 0;  // Ensure the correct Wi-Fi channel is used
+        peerInfo.encrypt = false;
+
+        if (!esp_now_is_peer_exist(mac_addr)) {
+            esp_err_t result = esp_now_add_peer(&peerInfo);
+            if (result != ESP_OK) {
+                ESP_LOGE(LOG_TAG, "Failed to add peer: %s", esp_err_to_name(result));
+                return;  // Exit if adding peer fails
+            } else {
+                ESP_LOGI(LOG_TAG, "Peer added successfully.");
+            }
+        }
+
         // Prepare the response
         const char* response = "YES";
 
@@ -823,9 +733,6 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
         esp_err_t result = esp_now_send(mac_addr, (const uint8_t*)response, strlen(response));
         if (result == ESP_OK) {
             ESP_LOGI(LOG_TAG, "Sent 'YES' response to the drone.");
-
-            // Set the flag to indicate that we received the message and responded
-            espNowMessageReceived = true;
 
             // Now proceed to send the data to the drone
             if (hasValidDataInNVS()) {
@@ -842,12 +749,16 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
                 ESP_LOGW(LOG_TAG, "No valid data in NVS to send.");
             }
         } else {
-            ESP_LOGE(LOG_TAG, "Failed to send 'YES' response.");
+            ESP_LOGE(LOG_TAG, "Failed to send 'YES' response: %s", esp_err_to_name(result));
         }
+    } else if (receivedData == "DONE") {
+        ESP_LOGI(LOG_TAG, "Received 'DONE' from drone. Data transfer complete.");
+        // Handle the finalization after the data transfer
     } else {
         ESP_LOGW(LOG_TAG, "Received unexpected data: %s", receivedData.c_str());
     }
 }
+
 
 // FIM DO AVALIAR !!!
 
@@ -875,7 +786,7 @@ extern "C" void app_main() {
     uint64_t deepSleepDuration_us = 10 * 1000000;  // 10 seconds in microseconds
 
     // Register the receive callback
-    esp_now_register_recv_cb(onDataReceive);
+    esp_now_register_recv_cb(onResponseReceived);
 
     // Start AUH? wait timer
     startAUHWaitTimer();
