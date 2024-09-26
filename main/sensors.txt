@@ -1,4 +1,0 @@
-sensor_1,BMP180
-sensor_2,DHT22
-sensor_3,SoilMoisture
-sensor_4,KY037
