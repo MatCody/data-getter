@@ -63,7 +63,7 @@ uint8_t recipientMacAddr[ESP_NOW_ETH_ALEN];
 #define DHT_GPIO_PIN GPIO_NUM_4
 
 // records into the NVS
-#define MAX_RECORDS 100  // Define the maximum number of records to store
+#define MAX_RECORDS 150  // Define the maximum number of records to store
 #define RECORD_KEY_PREFIX "record_"  // Prefix for NVS keys
 #define NVS_INDEX_KEY "nvs_index"  // Key for storing the current write index
 
@@ -478,6 +478,7 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
 
     nvs_close(nvsHandle);
 }
+
 
 
 // ! TEMPORARY
