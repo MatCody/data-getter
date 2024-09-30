@@ -11,7 +11,7 @@ extern "C" {
     #include "driver/gpio.h"
     #include "esp_system.h"
     #include "hal/adc_types.h"
-
+    #include "esp_system.h"  // Add this at the top of your file with other includes
 
     // SENSORS headers
     #include "sensors/bmp180/bmp180.h"
@@ -23,11 +23,11 @@ extern "C" {
     #include "nvs_flash.h"
     #include "nvs.h"
     #include "encrypt.h"
-
+    #include "driver/i2c_master.h"
     #include <inttypes.h>  // Add this to the top of your file
     #include "esp_timer.h"
     #include "cJSON.h"
-
+    #include "encrypt.h"
 
 }
 
@@ -39,9 +39,12 @@ extern "C" {
 #include <unordered_map>
 #include <queue>
 #include <mutex>
+#include <cstdlib>       // For strtof
+#include <random>
 
 // Global variables
-std::queue<std::string> dataQueue;
+// Queue to hold data chunks to be sent
+std::queue<std::vector<uint8_t>> dataQueue;
 std::mutex queueMutex;
 bool sendingInProgress = false;
 bool auhProcessed = false;
@@ -68,6 +71,18 @@ uint8_t recipientMacAddr[ESP_NOW_ETH_ALEN];
 #define NVS_INDEX_KEY "nvs_index"  // Key for storing the current write index
 
 const char* LOG_TAG = "DATA-GETTER";
+
+// Define message types as enums for better clarity
+enum MessageType {
+    MSG_AUH = 'A',
+    MSG_YES = 'Y',
+    MSG_START = 'S',
+    MSG_DONE = 'D',
+    MSG_ENC = 'E'
+};
+
+// Maximum payload size for ESP-NOW
+const size_t MAX_PAYLOAD_SIZE = 250;
 
 adc_oneshot_unit_handle_t adc_handle = NULL;
 
@@ -441,6 +456,55 @@ void ESP32DerivedClass::formatData(const std::string& sensorName, float sensorVa
 }
 
 void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::string& newSensorData) {
+    // Define dataToSave, which will be the data we actually save
+    std::string dataToSave = newSensorData;
+
+    // Parse newSensorData to extract the sensor value
+    size_t colonPos = newSensorData.find(":");
+    if (colonPos != std::string::npos) {
+        std::string valueStr = newSensorData.substr(colonPos + 1);
+        // Trim whitespace
+        valueStr.erase(0, valueStr.find_first_not_of(" \t"));
+        valueStr.erase(valueStr.find_last_not_of(" \t") + 1);
+
+        // Use strtof instead of std::stof to avoid exceptions
+        char* endPtr = nullptr;
+        float sensorValue = strtof(valueStr.c_str(), &endPtr);
+
+        if (endPtr == valueStr.c_str() || *endPtr != '\0') {
+            // Conversion failed
+            ESP_LOGE("saveDataToNVS", "Error parsing sensor value: %s", valueStr.c_str());
+            // Proceed with original newSensorData
+        } else {
+            // Decide whether to modify the sensor value (e.g., 10% chance)
+            bool modifyValue = false;
+
+            // Generate a random number between 0 and 99 using C++ <random>
+            static std::random_device rd;                   // Seed
+            static std::mt19937 gen(rd());                  // Mersenne Twister generator
+            static std::uniform_int_distribution<> distr(0, 99); // Range 0 to 99
+
+            uint32_t randomNumber = distr(gen);  // Generate random number
+            if (randomNumber < 10) {              // 10% chance
+                modifyValue = true;
+            }
+
+            if (modifyValue) {
+                // Modify the sensor value to be significantly different
+                float modifiedValue = sensorValue * 10.0f;  // For example, multiply by 10
+                // Reconstruct dataToSave with the modified value
+                dataToSave = sensorName + ": " + std::to_string(modifiedValue);
+
+                ESP_LOGI("saveDataToNVS", "Anomaly introduced. Modified %s value from %.2f to %.2f",
+                         sensorName.c_str(), sensorValue, modifiedValue);
+            }
+        }
+    } else {
+        ESP_LOGW("saveDataToNVS", "Invalid data format: %s", newSensorData.c_str());
+        // Proceed with original newSensorData
+    }
+
+    // Proceed to save dataToSave to NVS
     nvs_handle_t nvsHandle;
     esp_err_t err = nvs_open("sensor_storage", NVS_READWRITE, &nvsHandle);
     if (err != ESP_OK) {
@@ -455,9 +519,9 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     }
 
     char key[32];
-    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Generates unique key for each record
+    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Generate unique key
 
-    err = nvs_set_str(nvsHandle, key, newSensorData.c_str());  // Save data as string
+    err = nvs_set_str(nvsHandle, key, dataToSave.c_str());  // Save dataToSave instead of newSensorData
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to write to NVS: %s", esp_err_to_name(err));
     } else {
@@ -478,7 +542,6 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
 
     nvs_close(nvsHandle);
 }
-
 
 
 // ! TEMPORARY
@@ -649,19 +712,50 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
     {
         std::lock_guard<std::mutex> lock(queueMutex);
 
-        // **Enqueue "START" message**
-        dataQueue.push("START");
+        // **Enqueue unencrypted "START" message**
+        dataQueue.push(std::vector<uint8_t>{MSG_START});
 
-        // Split data into chunks and enqueue them
+        // Split data into chunks, encrypt, and enqueue them
+        size_t max_payload_size = MAX_PAYLOAD_SIZE;  // ESP-NOW payload limit
+        size_t max_chunk_size = max_payload_size - 1 - 16;  // Reserve space for MSG_ENC and padding
+
         while (offset < dataLength) {
-            size_t chunkSize = std::min(static_cast<size_t>(MAX_PAYLOAD_SIZE), dataLength - offset);
-            std::string dataChunk(serializedJson + offset, chunkSize);
-            dataQueue.push(dataChunk);
+            size_t remaining = dataLength - offset;
+            size_t chunkSize = (remaining >= max_chunk_size) ? max_chunk_size : remaining;
+
+            // Adjust chunkSize to be a multiple of 16 for AES
+            if (chunkSize % 16 != 0) {
+                chunkSize += 16 - (chunkSize % 16);
+                if (offset + chunkSize > dataLength) {
+                    chunkSize = dataLength - offset;
+                }
+            }
+
+            std::vector<uint8_t> dataChunk(serializedJson + offset, serializedJson + offset + chunkSize);
+
+            size_t encrypted_len;
+            uint8_t* encrypted_data = my_aes_encrypt(dataChunk.data(), dataChunk.size(), &encrypted_len);
+            if (encrypted_data == NULL) {
+                ESP_LOGE(LOG_TAG, "Encryption failed for data chunk.");
+                free(serializedJson);
+                return ESP_FAIL;
+            }
+
+            // Convert the encrypted data into a vector and then free the raw pointer
+            std::vector<uint8_t> encryptedChunk(encrypted_data, encrypted_data + encrypted_len);
+            free(encrypted_data);  // Free the memory allocated by aes_encrypt
+
+            // Prepend the message type
+            encryptedChunk.insert(encryptedChunk.begin(), MSG_ENC);
+            dataQueue.push(encryptedChunk);
+
+            ESP_LOGI(LOG_TAG, "Encrypted data chunk enqueued. Size: %d bytes", encryptedChunk.size());
+
             offset += chunkSize;
         }
 
-        // Enqueue "DONE" message
-        dataQueue.push("DONE");
+        // **Enqueue unencrypted "DONE" message**
+        dataQueue.push(std::vector<uint8_t>{MSG_DONE});
     }
 
     free(serializedJson);  // Free the serialized string memory
@@ -671,14 +765,15 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
     {
         std::lock_guard<std::mutex> lock(queueMutex);
         if (!sendingInProgress && !dataQueue.empty()) {
-            std::string firstChunk = dataQueue.front();
+            std::vector<uint8_t> firstChunk = dataQueue.front();
             dataQueue.pop();
-            esp_err_t result = esp_now_send(macAddress, (const uint8_t*)firstChunk.data(), firstChunk.size());
+            esp_err_t result = esp_now_send(macAddress, firstChunk.data(), firstChunk.size());
             if (result == ESP_OK) {
                 ESP_LOGI(LOG_TAG, "First chunk sent.");
                 sendingInProgress = true;
             } else {
                 ESP_LOGE(LOG_TAG, "Error sending first chunk: %s", esp_err_to_name(result));
+                sendingInProgress = false;  // Reset flag on error
                 return result;
             }
         }
@@ -686,6 +781,8 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
 
     return ESP_OK;
 }
+
+
 
 
 // Function to erase all data stored in NVS and reset the vectors(sensors)
@@ -747,79 +844,114 @@ bool espNowConnected = false;
 void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len) {
     const uint8_t *mac_addr = recv_info->src_addr;
 
-    // Process the received data
-    std::string receivedData(reinterpret_cast<const char*>(data), data_len);
+    if (data_len < 1) {
+        ESP_LOGW(LOG_TAG, "Received empty data.");
+        return;
+    }
 
-    ESP_LOGI(LOG_TAG, "Received data from: %02X:%02X:%02X:%02X:%02X:%02X - %.*s",
+    uint8_t messageType = data[0];
+    std::vector<uint8_t> messageData(data + 1, data + data_len);
+
+    ESP_LOGI(LOG_TAG, "Received message type: %c from: %02X:%02X:%02X:%02X:%02X:%02X",
+             messageType,
              mac_addr[0], mac_addr[1], mac_addr[2],
-             mac_addr[3], mac_addr[4], mac_addr[5],
-             data_len, receivedData.c_str());
+             mac_addr[3], mac_addr[4], mac_addr[5]);
 
-    // Check if 'AUH?' message is received and hasn't been processed yet
-    if (receivedData.compare(0, data_len, "AUH?") == 0 && !auhProcessed) {
-        ESP_LOGI(LOG_TAG, "Received 'AUH?' from the drone. Processing...");
+    switch (messageType) {
+        case MSG_AUH:
+            if (!auhProcessed) {
+                ESP_LOGI(LOG_TAG, "Received 'AUH?' from the drone. Processing...");
 
-        // Store the recipient's MAC address
-        memcpy(recipientMacAddr, mac_addr, ESP_NOW_ETH_ALEN);
+                // Store the recipient's MAC address
+                memcpy(recipientMacAddr, mac_addr, ESP_NOW_ETH_ALEN);
 
-        // Add the drone as a peer in the Sender ESP
-        esp_now_peer_info_t peerInfo = {};
-        memcpy(peerInfo.peer_addr, recipientMacAddr, ESP_NOW_ETH_ALEN);
-        peerInfo.channel = 0;  // Set to 0 to use current channel
-        peerInfo.encrypt = false;
+                // Add the drone as a peer in the Sender ESP
+                esp_now_peer_info_t peerInfo = {};
+                memcpy(peerInfo.peer_addr, recipientMacAddr, ESP_NOW_ETH_ALEN);
+                peerInfo.channel = 0;  // Use current channel
+                peerInfo.encrypt = false;
 
-        if (!esp_now_is_peer_exist(recipientMacAddr)) {
-            // Set the correct Wi-Fi channel
-            wifi_second_chan_t second;
-            esp_wifi_get_channel(&peerInfo.channel, &second);
+                if (!esp_now_is_peer_exist(recipientMacAddr)) {
+                    esp_err_t result = esp_now_add_peer(&peerInfo);
+                    if (result != ESP_OK) {
+                        ESP_LOGE(LOG_TAG, "Failed to add peer: %s", esp_err_to_name(result));
+                        return;  // Exit if adding peer fails
+                    } else {
+                        ESP_LOGI(LOG_TAG, "Peer added successfully.");
+                    }
+                }
 
-            esp_err_t result = esp_now_add_peer(&peerInfo);
-            if (result != ESP_OK) {
-                ESP_LOGE(LOG_TAG, "Failed to add peer: %s", esp_err_to_name(result));
-                return;  // Exit if adding peer fails
-            } else {
-                ESP_LOGI(LOG_TAG, "Peer added successfully.");
-            }
-        }
+                // Prepare the 'YES' response
+                std::vector<uint8_t> response = {'Y', 'E', 'S'};
 
-        // Prepare the 'YES' response
-        const char* response = "YES";
+                // Send the 'YES' response back via ESP-NOW
+                esp_err_t result = esp_now_send(recipientMacAddr, response.data(), response.size());
+                if (result == ESP_OK) {
+                    ESP_LOGI(LOG_TAG, "Sent 'YES' response to the drone.");
 
-        // Send the 'YES' response back via ESP-NOW
-        esp_err_t result = esp_now_send(recipientMacAddr, (const uint8_t*)response, strlen(response));
-        if (result == ESP_OK) {
-            ESP_LOGI(LOG_TAG, "Sent 'YES' response to the drone.");
+                    // Set the flag to indicate that 'AUH?' has been processed
+                    auhProcessed = true;
 
-            // Set the flag to indicate that 'AUH?' has been processed
-            auhProcessed = true;
+                    // Add a small delay to ensure the drone is ready
+                    vTaskDelay(pdMS_TO_TICKS(100));  // Wait for 100 milliseconds
 
-            // Add a small delay to ensure the drone is ready
-            vTaskDelay(pdMS_TO_TICKS(100));  // Wait for 100 milliseconds
-
-            // Now proceed to send the data to the drone
-            if (hasValidDataInNVS()) {
-                // Send data to the drone
-                esp_err_t err = sendNVSDataToDrone(recipientMacAddr);
-                if (err == ESP_OK) {
-                    // Erase NVS data after successful transmission
-                    eraseAllDataFromNVS();
-                    ESP_LOGI(LOG_TAG, "Data sent successfully to the drone.");
+                    // Now proceed to send the data to the drone
+                    if (hasValidDataInNVS()) {
+                        // Send data to the drone
+                        esp_err_t err = sendNVSDataToDrone(recipientMacAddr);
+                        if (err == ESP_OK) {
+                            // Erase NVS data after successful transmission
+                            eraseAllDataFromNVS();
+                            ESP_LOGI(LOG_TAG, "Data sent successfully to the drone.");
+                        } else {
+                            ESP_LOGE(LOG_TAG, "Failed to send data to the drone.");
+                        }
+                    } else {
+                        ESP_LOGW(LOG_TAG, "No valid data in NVS to send.");
+                    }
                 } else {
-                    ESP_LOGE(LOG_TAG, "Failed to send data to the drone.");
+                    ESP_LOGE(LOG_TAG, "Failed to send 'YES' response: %s", esp_err_to_name(result));
                 }
             } else {
-                ESP_LOGW(LOG_TAG, "No valid data in NVS to send.");
+                ESP_LOGI(LOG_TAG, "Received 'AUH?' again from the drone. Ignoring as it's already processed.");
             }
-        } else {
-            ESP_LOGE(LOG_TAG, "Failed to send 'YES' response: %s", esp_err_to_name(result));
+            break;
+
+        case MSG_YES:
+            // Handle 'YES' response if necessary
+            ESP_LOGI(LOG_TAG, "Received 'YES' from drone.");
+            break;
+
+        case MSG_START:
+            ESP_LOGI(LOG_TAG, "Received 'START' from drone.");
+            break;
+
+        case MSG_DONE:
+            ESP_LOGI(LOG_TAG, "Received 'DONE' from drone.");
+            // Optionally, mark the transmission as complete
+            sendingInProgress = false;
+            break;
+
+        case MSG_ENC:
+        {
+            size_t decrypted_len;  // Declare decrypted_len
+            uint8_t* decrypted_data = my_aes_decrypt(messageData.data(), messageData.size(), &decrypted_len);
+            if (decrypted_data != NULL) {
+                std::vector<uint8_t> decryptedData(decrypted_data, decrypted_data + decrypted_len);
+                free(decrypted_data);  // Free the allocated memory
+                // Process decryptedData
+            } else {
+                ESP_LOGE(LOG_TAG, "Failed to decrypt received data.");
+            }
         }
-    } else if (receivedData.compare(0, data_len, "AUH?") == 0 && auhProcessed) {
-        // If 'AUH?' has already been processed, ignore subsequent messages
-        ESP_LOGI(LOG_TAG, "Received 'AUH?' again from the drone. Ignoring as it's already processed.");
-    } else {
-        ESP_LOGW(LOG_TAG, "Received unexpected data: %.*s", data_len, receivedData.c_str());
+        break;
+
+        default:
+            ESP_LOGW(LOG_TAG, "Received unknown message type: %c", messageType);
+            break;
     }
 }
+
 
 
 void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
@@ -828,24 +960,30 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
         ESP_LOGI(LOG_TAG, "Data sent successfully.");
         // If there is more data in the queue, send the next chunk
         if (!dataQueue.empty()) {
-            std::string nextChunk = dataQueue.front();
+            std::vector<uint8_t> nextChunk = dataQueue.front();
             dataQueue.pop();
 
-            // Log the content of the next chunk
-            ESP_LOGI(LOG_TAG, "Sending next chunk: %s", nextChunk.c_str());
+            // Determine message type for logging
+            char msgType = nextChunk[0];
+            if (msgType == MSG_DONE) {
+                ESP_LOGI(LOG_TAG, "Sending 'DONE' message to receiver.");
+            } else if (msgType == MSG_START) {
+                ESP_LOGI(LOG_TAG, "Sending 'START' message to receiver.");
+            } else if (msgType == MSG_ENC) {
+                ESP_LOGI(LOG_TAG, "Sending encrypted data chunk.");
+            } else {
+                ESP_LOGI(LOG_TAG, "Sending unknown type message.");
+            }
 
-            esp_err_t result = esp_now_send(recipientMacAddr, (const uint8_t*)nextChunk.data(), nextChunk.size());
+            // Send the next chunk
+            esp_err_t result = esp_now_send(recipientMacAddr, nextChunk.data(), nextChunk.size());
             if (result != ESP_OK) {
                 ESP_LOGE(LOG_TAG, "Error sending next data chunk: %s", esp_err_to_name(result));
                 sendingInProgress = false;
             } else {
-                // Log if the chunk is the "DONE" message
-                if (nextChunk == "DONE") {
-                    ESP_LOGI(LOG_TAG, "Sent 'DONE' message to receiver.");
-                } else if (nextChunk == "START") {
-                    ESP_LOGI(LOG_TAG, "Sent 'START' message to receiver.");
-                } else {
-                    ESP_LOGI(LOG_TAG, "Next data chunk sent successfully.");
+                // Continue sending
+                if (msgType == MSG_DONE) {
+                    ESP_LOGI(LOG_TAG, "'DONE' message sent. Transmission complete.");
                 }
             }
         } else {
@@ -858,6 +996,7 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
         sendingInProgress = false;
     }
 }
+
 
 
 // FIM DO AVALIAR !!!
