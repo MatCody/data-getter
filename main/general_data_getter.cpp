@@ -171,8 +171,6 @@ void initESPNow() {
     ESP_LOGI(LOG_TAG_ESP_NOW, "ESP-NOW setup complete.");
 }
 
-
-
 // TXT FILE <start>
 // Structure to hold sensor data
 struct SensorInfo {
@@ -544,7 +542,7 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
 }
 
 
-// ! TEMPORARY
+// ! TEMPORARY (JUST FOR DEBUG)
 void ESP32DerivedClass::readAllDataFromNVS() {
     nvs_handle_t nvsHandle;
     esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &nvsHandle);
@@ -668,6 +666,7 @@ Example of the data in the queue to transmit:
 */
 
 #define MAX_PAYLOAD_SIZE 250
+constexpr size_t AES_BLOCK_SIZE = 16;
 
 esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
     std::vector<SensorData> sensorDataList = getAllDataFromNVS();
@@ -712,23 +711,35 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
     {
         std::lock_guard<std::mutex> lock(queueMutex);
 
-        // **Enqueue unencrypted "START" message**
+        // Enqueue unencrypted "START" message
         dataQueue.push(std::vector<uint8_t>{MSG_START});
 
-        // Split data into chunks, encrypt, and enqueue them
-        size_t max_payload_size = MAX_PAYLOAD_SIZE;  // ESP-NOW payload limit
-        size_t max_chunk_size = max_payload_size - 1 - 16;  // Reserve space for MSG_ENC and padding
+        // Calculate maximum lengths
+        //constexpr size_t MAX_PAYLOAD_SIZE = 250;
+        constexpr size_t RESERVED_BYTES = 1;     // For MSG_ENC
+        constexpr size_t AES_BLOCK_SIZE = 16;
+
+        size_t max_encrypted_len = MAX_PAYLOAD_SIZE - RESERVED_BYTES; // 249 bytes
+        size_t max_blocks = max_encrypted_len / AES_BLOCK_SIZE; // floor division
+        size_t max_encrypted_data_len = max_blocks * AES_BLOCK_SIZE; // 240 bytes
+        size_t max_plaintext_len = max_encrypted_data_len - AES_BLOCK_SIZE; // 224 bytes
 
         while (offset < dataLength) {
             size_t remaining = dataLength - offset;
-            size_t chunkSize = (remaining >= max_chunk_size) ? max_chunk_size : remaining;
+            size_t chunkSize = std::min(remaining, max_plaintext_len);
 
-            // Adjust chunkSize to be a multiple of 16 for AES
-            if (chunkSize % 16 != 0) {
-                chunkSize += 16 - (chunkSize % 16);
-                if (offset + chunkSize > dataLength) {
-                    chunkSize = dataLength - offset;
-                }
+            // Adjust chunkSize down to be a multiple of AES_BLOCK_SIZE
+            if (chunkSize >= AES_BLOCK_SIZE) {
+                chunkSize = (chunkSize / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+            } else {
+                // If remaining data is less than AES_BLOCK_SIZE
+                chunkSize = remaining;
+            }
+
+            // Ensure chunkSize is not zero
+            if (chunkSize == 0) {
+                ESP_LOGE(LOG_TAG, "Chunk size is zero after adjustment. Exiting loop.");
+                break;
             }
 
             std::vector<uint8_t> dataChunk(serializedJson + offset, serializedJson + offset + chunkSize);
@@ -741,20 +752,49 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
                 return ESP_FAIL;
             }
 
+            // Check if the encrypted data size plus 1 exceeds max_payload_size
+            if (encrypted_len + 1 > MAX_PAYLOAD_SIZE) {
+                ESP_LOGE(LOG_TAG, "Encrypted chunk exceeds maximum payload size. Encrypted length: %d bytes", (int)encrypted_len);
+                free(encrypted_data);
+                free(serializedJson);
+                return ESP_FAIL;
+            }
+
+            // Log chunk sizes
+            ESP_LOGI(LOG_TAG, "Chunk size (plaintext): %d bytes", (int)chunkSize);
+            ESP_LOGI(LOG_TAG, "Encrypted data length: %d bytes", (int)encrypted_len);
+            ESP_LOGI(LOG_TAG, "Total packet size (encrypted data + 1): %d bytes", (int)(encrypted_len + 1));
+
+            // Decrypt the encrypted data to verify encryption/decryption
+            size_t decrypted_len;
+            uint8_t* decrypted_data = my_aes_decrypt(encrypted_data, encrypted_len, &decrypted_len);
+            if (decrypted_data == NULL) {
+                ESP_LOGE(LOG_TAG, "Decryption failed for data chunk.");
+                free(encrypted_data);
+                free(serializedJson);
+                return ESP_FAIL;
+            }
+
+            // Log the decrypted data
+            ESP_LOGI(LOG_TAG, "Decrypted data chunk: %.*s", (int)decrypted_len, decrypted_data);
+
+            // Free the decrypted data
+            free(decrypted_data);
+
             // Convert the encrypted data into a vector and then free the raw pointer
             std::vector<uint8_t> encryptedChunk(encrypted_data, encrypted_data + encrypted_len);
-            free(encrypted_data);  // Free the memory allocated by aes_encrypt
+            free(encrypted_data);  // Free the memory allocated by my_aes_encrypt
 
             // Prepend the message type
             encryptedChunk.insert(encryptedChunk.begin(), MSG_ENC);
             dataQueue.push(encryptedChunk);
 
-            ESP_LOGI(LOG_TAG, "Encrypted data chunk enqueued. Size: %d bytes", encryptedChunk.size());
+            ESP_LOGI(LOG_TAG, "Encrypted data chunk enqueued. Size: %d bytes", (int)encryptedChunk.size());
 
             offset += chunkSize;
         }
 
-        // **Enqueue unencrypted "DONE" message**
+        // Enqueue unencrypted "DONE" message
         dataQueue.push(std::vector<uint8_t>{MSG_DONE});
     }
 
@@ -783,9 +823,8 @@ esp_err_t sendNVSDataToDrone(const uint8_t* macAddress) {
 }
 
 
-
-
 // Function to erase all data stored in NVS and reset the vectors(sensors)
+// ? OK
 esp_err_t eraseAllDataFromNVS() {
     // Initialize the NVS handle
     nvs_handle_t nvsHandle;
@@ -816,6 +855,7 @@ esp_err_t eraseAllDataFromNVS() {
 
     return err;
 }
+
 bool hasValidDataInNVS() {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("sensor_storage", NVS_READONLY, &my_handle);
@@ -840,7 +880,6 @@ bool hasValidDataInNVS() {
 //
 // AVALIAR !!!
 bool espNowConnected = false;
-
 void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *data, int data_len) {
     const uint8_t *mac_addr = recv_info->src_addr;
 
@@ -850,7 +889,6 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
     }
 
     uint8_t messageType = data[0];
-    std::vector<uint8_t> messageData(data + 1, data + data_len);
 
     ESP_LOGI(LOG_TAG, "Received message type: %c from: %02X:%02X:%02X:%02X:%02X:%02X",
              messageType,
@@ -881,8 +919,8 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
                     }
                 }
 
-                // Prepare the 'YES' response
-                std::vector<uint8_t> response = {'Y', 'E', 'S'};
+                // Prepare the 'YES' response with the message type MSG_YES
+                std::vector<uint8_t> response = {MSG_YES};
 
                 // Send the 'YES' response back via ESP-NOW
                 esp_err_t result = esp_now_send(recipientMacAddr, response.data(), response.size());
@@ -917,42 +955,12 @@ void onResponseReceived(const esp_now_recv_info_t *recv_info, const uint8_t *dat
             }
             break;
 
-        case MSG_YES:
-            // Handle 'YES' response if necessary
-            ESP_LOGI(LOG_TAG, "Received 'YES' from drone.");
-            break;
-
-        case MSG_START:
-            ESP_LOGI(LOG_TAG, "Received 'START' from drone.");
-            break;
-
-        case MSG_DONE:
-            ESP_LOGI(LOG_TAG, "Received 'DONE' from drone.");
-            // Optionally, mark the transmission as complete
-            sendingInProgress = false;
-            break;
-
-        case MSG_ENC:
-        {
-            size_t decrypted_len;  // Declare decrypted_len
-            uint8_t* decrypted_data = my_aes_decrypt(messageData.data(), messageData.size(), &decrypted_len);
-            if (decrypted_data != NULL) {
-                std::vector<uint8_t> decryptedData(decrypted_data, decrypted_data + decrypted_len);
-                free(decrypted_data);  // Free the allocated memory
-                // Process decryptedData
-            } else {
-                ESP_LOGE(LOG_TAG, "Failed to decrypt received data.");
-            }
-        }
-        break;
-
+        // Remove unnecessary cases if not expected
         default:
             ESP_LOGW(LOG_TAG, "Received unknown message type: %c", messageType);
             break;
     }
 }
-
-
 
 void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
     std::lock_guard<std::mutex> lock(queueMutex);
@@ -964,15 +972,20 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
             dataQueue.pop();
 
             // Determine message type for logging
-            char msgType = nextChunk[0];
-            if (msgType == MSG_DONE) {
-                ESP_LOGI(LOG_TAG, "Sending 'DONE' message to receiver.");
-            } else if (msgType == MSG_START) {
-                ESP_LOGI(LOG_TAG, "Sending 'START' message to receiver.");
-            } else if (msgType == MSG_ENC) {
-                ESP_LOGI(LOG_TAG, "Sending encrypted data chunk.");
-            } else {
-                ESP_LOGI(LOG_TAG, "Sending unknown type message.");
+            uint8_t msgType = nextChunk[0];
+            switch (msgType) {
+                case MSG_DONE:
+                    ESP_LOGI(LOG_TAG, "Sending 'DONE' message to receiver.");
+                    break;
+                case MSG_START:
+                    ESP_LOGI(LOG_TAG, "Sending 'START' message to receiver.");
+                    break;
+                case MSG_ENC:
+                    ESP_LOGI(LOG_TAG, "Sending encrypted data chunk.");
+                    break;
+                default:
+                    ESP_LOGI(LOG_TAG, "Sending unknown type message.");
+                    break;
             }
 
             // Send the next chunk
@@ -984,6 +997,7 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
                 // Continue sending
                 if (msgType == MSG_DONE) {
                     ESP_LOGI(LOG_TAG, "'DONE' message sent. Transmission complete.");
+                    sendingInProgress = false;
                 }
             }
         } else {
@@ -992,14 +1006,73 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
             ESP_LOGI(LOG_TAG, "All data chunks have been sent.");
         }
     } else {
-        ESP_LOGE(LOG_TAG, "Data send failed.");
+        ESP_LOGE(LOG_TAG, "Data send failed with status: %d", status);
         sendingInProgress = false;
     }
 }
 
+// void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+// bool connectToWiFi(const char* ssid, const char* password);
 
+// // FIM DO AVALIAR !!!
+// // CONECTAR A INTERNET UMA VEZ PARA AJUSTAR O HORÀRIO DO RTC
+// bool connectToWiFi(const char* ssid, const char* password) {
+//     // Create event group if not already created
+//     if (wifi_event_group == NULL) {
+//         wifi_event_group = xEventGroupCreate();
+//     }
 
-// FIM DO AVALIAR !!!
+//     // Register event handler if not already registered
+//     static bool event_handlers_registered = false;
+//     if (!event_handlers_registered) {
+//         ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+//         ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+//         event_handlers_registered = true;
+//     }
+
+//     // Set Wi-Fi configuration
+//     wifi_config_t wifi_config = {};
+//     strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+//     strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
+
+//     // Set the scan method to all channels
+//     wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+
+//     // Set mode to station
+//     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+//     // Set Wi-Fi configuration
+//     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+//     // Connect to the AP
+//     ESP_ERROR_CHECK(esp_wifi_connect());
+
+//     // Retry Wi-Fi connection up to 3 times
+//     int retryCount = 0;
+//     const int maxRetries = 3;
+//     bool connected = false;
+
+//     while (retryCount < maxRetries) {
+//         EventBits_t bits = xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
+//         if (bits & CONNECTED_BIT) {
+//             ESP_LOGI(LOG_TAG_DRONE, "Successfully connected to Wi-Fi");
+//             connected = true;
+//             break;
+//         } else {
+//             ESP_LOGE(LOG_TAG_DRONE, "Failed to connect to Wi-Fi, attempt %d/%d", retryCount + 1, maxRetries);
+//             // Reattempt connection
+//             ESP_ERROR_CHECK(esp_wifi_disconnect());
+//             ESP_ERROR_CHECK(esp_wifi_connect());
+//         }
+//         retryCount++;
+//     }
+
+//     if (!connected) {
+//         ESP_LOGE(LOG_TAG_DRONE, "Failed to connect to Wi-Fi after %d attempts", maxRetries);
+//     }
+
+//     return connected;
+// }
 
 
 extern "C" void app_main() {
@@ -1008,7 +1081,7 @@ extern "C" void app_main() {
     initADC();
     ESP32DerivedClass esp32;
 
-    // Initialize ESP-NOW
+
     initWiFi();
     initESPNow();
 
@@ -1034,7 +1107,7 @@ extern "C" void app_main() {
 
     // Wait until AUH? is received or timer expires
     while (!auhReceived && !auhWaitTimerExpired) { 
-        vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100 ms
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Check every 100 ms
     }
 
     if (!auhReceived) {
