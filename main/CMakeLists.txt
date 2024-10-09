@@ -10,8 +10,11 @@ idf_component_register(SRCS "general_data_getter.cpp" "encrypt.c"
                        "sensors/dht11/dht11.c"
                        "sensors/yl69/yl69.c"
                        "sensors/acoustic/acoustic.c"
+                       "sensors/RTC/rtc.c"
                        INCLUDE_DIRS "sensors/bmp180"
                                     "sensors/dht11"
                                     "sensors/yl69"
-                                    "sensors/acoustic")
+                                    "sensors/acoustic"
+                                    "sensors/RTC"
+                                    )
 

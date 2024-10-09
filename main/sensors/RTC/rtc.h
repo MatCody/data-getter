@@ -1,14 +1,20 @@
 #ifndef RTC_H
 #define RTC_H
 
-#include <time.h>
-#include "driver/i2c.h"
-#include "esp_log.h"
-#include "esp_sleep.h"
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "esp_wifi.h"
-#include "esp_event.h"
+#include "esp_log.h"
 #include "nvs_flash.h"
+#include "driver/i2c.h"
 #include "esp_sntp.h"
+#include "esp_sleep.h"
+
+static EventGroupHandle_t wifi_event_group;
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
 
 // I2C configuration for DS3231 RTC
 #define I2C_MASTER_SCL_IO 22       // Define your SCL pin
@@ -26,5 +32,7 @@ void initialize_sntp(void);
 void sync_time_with_ntp_and_set_ds3231(void);
 void configure_wakeup_pin(void);
 void enter_deep_sleep_until_alarm(void);
+void set_next_alarm(struct tm *current_time);
+bool ds3231_get_time(struct tm *timeinfo);
 
 #endif // RTC_H

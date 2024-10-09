@@ -29,6 +29,7 @@ extern "C" {
     #include "cJSON.h"
     #include "encrypt.h"
 
+    #include "rtc.h"
 }
 
 #include <string>
@@ -48,6 +49,7 @@ std::queue<std::vector<uint8_t>> dataQueue;
 std::mutex queueMutex;
 bool sendingInProgress = false;
 bool auhProcessed = false;
+bool dataTransmissionComplete= false;
 uint8_t recipientMacAddr[ESP_NOW_ETH_ALEN];
 
 // Declare 'voltage dividir GPIO' | declare the 'ADC_PIN' | declare 'ADC_POWER_DOWN_DELAY''
@@ -976,6 +978,7 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
             switch (msgType) {
                 case MSG_DONE:
                     ESP_LOGI(LOG_TAG, "Sending 'DONE' message to receiver.");
+                    dataTransmissionComplete = true; // Set the flag here
                     break;
                 case MSG_START:
                     ESP_LOGI(LOG_TAG, "Sending 'START' message to receiver.");
@@ -1074,61 +1077,87 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 //     return connected;
 // }
 
-
 extern "C" void app_main() {
-    // Initialize NVS
+    // Initialize NVS, ADC, and I2C
     initNVS();
     initADC();
+    i2c_master_init();
     ESP32DerivedClass esp32;
 
+    // Sync time with NTP and set DS3231 (includes Wi-Fi initialization)
+    sync_time_with_ntp_and_set_ds3231();
 
-    initWiFi();
-    initESPNow();
+    // Configure wake-up pin (SQW from DS3231)
+    configure_wakeup_pin();
 
-    // Get sensors list
-    std::vector<SensorInfo> sensors = getSensorsList();
-    if (!sensors.empty()) {
-        displaySensors(sensors);
-    } else {
-        ESP_LOGE("app_main", "No sensors found in the file.");
-    }
-
-
-    // Configuration for deep sleep
-    uint64_t deepSleepDuration_us = 10 * 1000000;  // 10 seconds in microseconds
-
-    // Register the receive callback
+    // Register ESP-NOW callbacks
     esp_now_register_recv_cb(onResponseReceived);
     esp_now_register_send_cb(on_data_sent);
-    // Start AUH? wait timer
-    startAUHWaitTimer();
 
-    ESP_LOGI("Main", "Waiting for 'AUH?' message...");
+    // Enter deep sleep to wait for the first scheduled wake-up
+    ESP_LOGI("Main", "Entering initial deep sleep...");
+    enter_deep_sleep_until_alarm();
 
-    // Wait until AUH? is received or timer expires
-    while (!auhReceived && !auhWaitTimerExpired) { 
-        vTaskDelay(pdMS_TO_TICKS(1000));  // Check every 100 ms
-    }
+    while (true) {
+        // Reinitialize peripherals after wake-up
+        i2c_master_init();
 
-    if (!auhReceived) {
-        ESP_LOGI("Main", "'AUH?' not received. Proceeding to check battery and read sensors.");
+        // Initialize flags upon wake-up
+        auhReceived = false;
+        auhProcessed = false;
+        dataTransmissionComplete = false;
 
-        // Check battery level
-        float batteryLevel = esp32.checkBatteryLevel(adc_handle);
-        if (batteryLevel > 20.0) {
-            ESP_LOGI("Main", "Battery level sufficient. Reading sensor data.");
-            esp32.readSensorData();
-            ESP_LOGI("Main", "Time to display");
-            vTaskDelay(pdMS_TO_TICKS(3000));  // Check every 100 ms
-            esp32.readAllDataFromNVS();
+        // Get current time
+        struct tm timeinfo;
+        ds3231_get_time(&timeinfo);
+
+        ESP_LOGI("Main", "Current time: %02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+
+        if (timeinfo.tm_hour == 6 || timeinfo.tm_hour == 18) {
+            // At 6 AM and 6 PM: Check battery and collect data
+            float batteryLevel = esp32.checkBatteryLevel(adc_handle);
+            if (batteryLevel > 30.0) {
+                ESP_LOGI("Main", "Battery level sufficient. Reading sensor data.");
+                esp32.readSensorData();
+                esp32.readAllDataFromNVS();
+            } else {
+                ESP_LOGW("Main", "Battery level low. Skipping sensor reading.");
+            }
+            // Set next alarm and enter deep sleep
+            set_next_alarm(&timeinfo);
+            enter_deep_sleep_until_alarm();
+        } else if (timeinfo.tm_hour == 14) {
+            // At 2 PM: Wait for 'AUH?' message until 3 PM
+            time_t start_time, now;
+            time(&start_time);
+            ESP_LOGI("Main", "Waiting for 'AUH?' message from 2 PM to 3 PM...");
+
+            while (difftime(time(&now), start_time) < 3600) { // Wait up to 1 hour
+                if (dataTransmissionComplete) {
+                    ESP_LOGI("Main", "Data transmission complete. Entering deep sleep.");
+                    break;
+                }
+
+                if (auhReceived && !sendingInProgress) {
+                    ESP_LOGI("Main", "'AUH?' received. Starting data transmission.");
+                    // Data transmission is handled in callbacks
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
+            }
+
+            if (!dataTransmissionComplete && !auhReceived) {
+                ESP_LOGI("Main", "'AUH?' not received within the time window. Entering deep sleep.");
+            }
+
+            // Set next alarm and enter deep sleep
+            set_next_alarm(&timeinfo);
+            enter_deep_sleep_until_alarm();
         } else {
-            ESP_LOGW("Main", "Battery level low. Skipping sensor reading.");
+            // No scheduled tasks at this time
+            ESP_LOGI("Main", "No scheduled tasks at this time. Entering deep sleep.");
+            set_next_alarm(&timeinfo);
+            enter_deep_sleep_until_alarm();
         }
-    } else {
-        ESP_LOGI("Main", "Data sent to drone after receiving 'AUH?'.");
     }
-
-    // Enter deep sleep
-    ESP_LOGI("Main", "Entering deep sleep for %llu microseconds.", deepSleepDuration_us);
-    esp32.deepSleep("SLEEP", deepSleepDuration_us);
 }
