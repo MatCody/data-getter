@@ -11,6 +11,7 @@
 #include "driver/i2c.h"
 #include "esp_sntp.h"
 #include "esp_sleep.h"
+#include "driver/rtc_io.h"
 
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -26,13 +27,15 @@ static EventGroupHandle_t wifi_event_group;
 #define GPIO_WAKEUP_PIN GPIO_NUM_33 // GPIO connected to DS3231 SQW
 
 // Function declarations
-void i2c_master_init(void);
-void ds3231_set_alarm(uint8_t hour, uint8_t minute);
+void i2c_master_init(int pin_sda, int pin_scl);
+//void ds3231_set_alarm(uint8_t hour, uint8_t minute);
+void ds3231_set_alarm_at_time(uint8_t hour, uint8_t minute, uint8_t second);
 void initialize_sntp(void);
 void sync_time_with_ntp_and_set_ds3231(void);
 void configure_wakeup_pin(void);
 void enter_deep_sleep_until_alarm(void);
 void set_next_alarm(struct tm *current_time);
 bool ds3231_get_time(struct tm *timeinfo);
-
+void ds3231_clear_alarm_flags(void);
+//void check_alarm_flag(void);
 #endif // RTC_H

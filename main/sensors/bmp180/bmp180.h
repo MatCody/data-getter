@@ -11,7 +11,7 @@
 #define BMP180_H
 
 #include "esp_err.h"
-
+#include "rtc.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,7 +21,7 @@ extern "C" {
 #define ESP_ERR_BMP180_NOT_DETECTED          (ESP_ERR_BMP180_BASE + 2)
 #define ESP_ERR_BMP180_CALIBRATION_FAILURE   (ESP_ERR_BMP180_BASE + 3)
 
-esp_err_t bmp180_init(int pin_sda, int pin_scl);
+esp_err_t bmp180_init(void);
 esp_err_t bmp180_read_temperature(float* temperature);
 esp_err_t bmp180_read_pressure(uint32_t* pressure);
 esp_err_t bmp180_read_altitude(uint32_t reference_pressure, float* altitude);

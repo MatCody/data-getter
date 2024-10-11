@@ -281,30 +281,8 @@ esp_err_t bmp180_read_altitude(uint32_t reference_pressure, float* altitude)
 }
 
 
-esp_err_t bmp180_init(int pin_sda, int pin_scl)
-{
+esp_err_t bmp180_init(void) {
     esp_err_t err;
-
-    i2c_config_t conf;
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = pin_sda;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_io_num = pin_scl;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = 100000;
-    conf.clk_flags = 0;
-
-    err = i2c_param_config(I2C_NUM_0, &conf);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2C driver configuration failed with error = %d", err);
-        return ESP_ERR_BMP180_NOT_DETECTED;
-    }
-    i2c_driver_install(I2C_NUM_0, I2C_MODE_MASTER, 0, 0, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2C driver installation failed with error = %d", err);
-        return ESP_ERR_BMP180_NOT_DETECTED;
-    }
-    ESP_LOGI(TAG, "I2C master driver has been installed.");
 
     uint8_t reg = 0x00;
     err = bmp180_master_write_slave(I2C_NUM_0, &reg, 1);
@@ -315,6 +293,8 @@ esp_err_t bmp180_init(int pin_sda, int pin_scl)
     }
 
     ESP_LOGI(TAG, "BMP180 sensor found at 0x%02x", BMP180_ADDRESS);
+
+    // Read calibration data from the BMP180
     err  = bmp180_read_int16(I2C_NUM_0, BMP180_CAL_AC1, &ac1);
     err |= bmp180_read_int16(I2C_NUM_0, BMP180_CAL_AC2, &ac2);
     err |= bmp180_read_int16(I2C_NUM_0, BMP180_CAL_AC3, &ac3);
@@ -332,8 +312,6 @@ esp_err_t bmp180_init(int pin_sda, int pin_scl)
         return ESP_ERR_BMP180_CALIBRATION_FAILURE;
     }
 
-    ESP_LOGI(TAG, "AC1: %d, AC2: %d, AC3: %d, AC4: %d, AC5: %d, AC6: %d", ac1, ac2, ac3, ac4, ac5, ac6);
-    ESP_LOGI(TAG, "B1: %d, B2: %d, MB: %d, MC: %d, MD: %d", b1, b2, mb, mc, md);
-
+    ESP_LOGI(TAG, "Calibration data read successfully");
     return ESP_OK;
 }

@@ -23,13 +23,14 @@ extern "C" {
     #include "nvs_flash.h"
     #include "nvs.h"
     #include "encrypt.h"
-    #include "driver/i2c_master.h"
+    //#include "driver/i2c_master.h"
     #include <inttypes.h>  // Add this to the top of your file
     #include "esp_timer.h"
     #include "cJSON.h"
     #include "encrypt.h"
 
     #include "rtc.h"
+    
 }
 
 #include <string>
@@ -42,6 +43,7 @@ extern "C" {
 #include <mutex>
 #include <cstdlib>       // For strtof
 #include <random>
+#include <inttypes.h> // Include this header for PRIu32
 
 // Global variables
 // Queue to hold data chunks to be sent
@@ -60,8 +62,8 @@ uint8_t recipientMacAddr[ESP_NOW_ETH_ALEN];
 #define LOG_TAG_ESP_NOW "ESP-NOW-DATA_GETTER"
 
 // BMP180
-#define I2C_NUM_0 0
-#define BMP180_ADDRESS 0x77
+//#define I2C_NUM_0 0
+//#define BMP180_ADDRESS 0x77
 
 // DHT22
 #define DHT_TYPE_DHT22 22
@@ -233,6 +235,34 @@ void onESPNowSend(const uint8_t *mac_addr, esp_now_send_status_t status) {
 // Flowchart
 // Deep Sleep function, Check battery level function, Cryptograph data
 // Handle different types of sensors (each one with a unique driver) -> use a type of menu
+bool getCurrentTime(std::string& dateTimeStr);
+bool getCurrentTime(std::string& dateTimeStr) {
+    struct tm timeinfo{};
+
+    // Attempt to get time from DS3231
+    if (!ds3231_get_time(&timeinfo)) {
+        ESP_LOGE("getCurrentTime", "Failed to retrieve time from DS3231 RTC.");
+        return false;
+    }
+
+    // Buffer to hold the formatted date and time
+    char buffer[64];
+
+    // Updated format: "YYYY-MM-DD HH:MM" (exclude seconds)
+    size_t bytesWritten = strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &timeinfo);
+
+    if (bytesWritten == 0) {
+        ESP_LOGE("getCurrentTime", "strftime failed to format the time string.");
+        return false;
+    }
+
+    // Assign the formatted string to the output parameter
+    dateTimeStr = buffer;
+
+    ESP_LOGI("getCurrentTime", "Current Time: %s", dateTimeStr.c_str());
+
+    return true;
+}
 
 
 std::vector<SensorInfo> getSensorsList() {
@@ -348,17 +378,17 @@ void ESP32DerivedClass::readSensorData() {
 }
 
 //SDA(GPIO 21 ou 22) | SCL(GPIO 22 ou 23) | VCC e GND
+
 void ESP32DerivedClass::readBMP180() {
     float temperature;
     uint32_t pressure;
 
     // Reinitialize every time after waking from deep sleep
-    if (bmp180_init(GPIO_NUM_21, GPIO_NUM_22) == ESP_OK) {
+    if (bmp180_init() == ESP_OK) {
         // Read temperature
         if (bmp180_read_temperature(&temperature) == ESP_OK) {
             formatData("BMP180_T", temperature);
-            ESP_LOGI("BMP180", "Temperature in Celsius");
-
+            ESP_LOGI("BMP180", "Temperature in Celsius: %.2f", temperature);
         } else {
             ESP_LOGE("BMP180", "Failed to read temperature");
         }
@@ -366,14 +396,13 @@ void ESP32DerivedClass::readBMP180() {
         // Read pressure
         if (bmp180_read_pressure(&pressure) == ESP_OK) {
             formatData("BMP180_P", pressure);
-            ESP_LOGI("BMP180", "Barometric pressure in Pascal, normal atm is 1000 to 1020 hPa(hectopascal)");
-
+            ESP_LOGI("BMP180", "Barometric pressure in Pascal: %" PRIu32, pressure);  // Use PRIu32
         } else {
             ESP_LOGE("BMP180", "Failed to read pressure");
         }
     } else {
         ESP_LOGE("BMP180", "Failed to initialize BMP180");
-    }   
+    }
 }
 
 // DHT_GPIO_PIN (choose a GPIO) | VCC e GND | 4.7k from DHT22 to VCC
@@ -439,16 +468,30 @@ void ESP32DerivedClass::readKY037() {
 }
 
 void ESP32DerivedClass::formatData(const std::string& sensorName, float sensorValue) {
-    std::string formattedData = sensorName + ": " + std::to_string(sensorValue);
-    // Append data to corresponding sensor vector
-    if (sensorName == "BMP180") {
+    std::string dateTimeStr;
+
+    // Retrieve the current time
+    if (!getCurrentTime(dateTimeStr)) {
+        ESP_LOGE("formatData", "Failed to get current time. Using placeholder.");
+        dateTimeStr = "1970-01-01 00:00:00"; // Placeholder or handle as needed
+    }
+
+    // Format data as "YYYY-MM-DD HH:MM:SS - SensorName: Value"
+    std::ostringstream ss;
+    ss << dateTimeStr << " - " << sensorName << ": " << sensorValue;
+    std::string formattedData = ss.str();
+
+    // Append data to the corresponding sensor vector
+    if (sensorName.find("BMP180") != std::string::npos) {
         bmp180Data.push_back(formattedData);
-    } else if (sensorName == "DHT11") {
+    } else if (sensorName.find("DHT11") != std::string::npos) {
         dht11Data.push_back(formattedData);
     } else if (sensorName == "SoilMoisture") {
         soilMoistureData.push_back(formattedData);
     } else if (sensorName == "KY037") {
         ky037Data.push_back(formattedData);
+    } else {
+        ESP_LOGW("formatData", "Unknown sensor name: %s", sensorName.c_str());
     }
 
     // Save the sensor data to NVS
@@ -459,10 +502,24 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     // Define dataToSave, which will be the data we actually save
     std::string dataToSave = newSensorData;
 
-    // Parse newSensorData to extract the sensor value
-    size_t colonPos = newSensorData.find(":");
+    // Extract dateTimeStr from newSensorData
+    size_t separatorPos = newSensorData.find(" - ");
+    std::string dateTimeStr;
+    if (separatorPos != std::string::npos) {
+        dateTimeStr = newSensorData.substr(0, separatorPos);
+    } else {
+        // Handle error or assign a default dateTimeStr
+        dateTimeStr = "1970-01-01 00:00"; // Or handle as needed
+    }
+
+    // Construct the search string (e.g., "BMP180_T:")
+    std::string searchStr = sensorName + ":";
+    size_t colonPos = newSensorData.find(searchStr);
     if (colonPos != std::string::npos) {
-        std::string valueStr = newSensorData.substr(colonPos + 1);
+        // Position after the search string
+        size_t valueStart = colonPos + searchStr.length();
+        std::string valueStr = newSensorData.substr(valueStart);
+
         // Trim whitespace
         valueStr.erase(0, valueStr.find_first_not_of(" \t"));
         valueStr.erase(valueStr.find_last_not_of(" \t") + 1);
@@ -480,28 +537,28 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
             bool modifyValue = false;
 
             // Generate a random number between 0 and 99 using C++ <random>
-            static std::random_device rd;                   // Seed
-            static std::mt19937 gen(rd());                  // Mersenne Twister generator
+            static std::random_device rd;                        // Seed
+            static std::mt19937 gen(rd());                       // Mersenne Twister generator
             static std::uniform_int_distribution<> distr(0, 99); // Range 0 to 99
 
-            uint32_t randomNumber = distr(gen);  // Generate random number
-            if (randomNumber < 10) {              // 10% chance
+            uint32_t randomNumber = distr(gen); // Generate random number
+            if (randomNumber < 10) {            // 10% chance
                 modifyValue = true;
             }
 
             if (modifyValue) {
                 // Modify the sensor value to be significantly different
-                float modifiedValue = sensorValue * 10.0f;  // For example, multiply by 10
-                // Reconstruct dataToSave with the modified value
-                dataToSave = sensorName + ": " + std::to_string(modifiedValue);
+                float modifiedValue = sensorValue * 10.0f; // For example, multiply by 10
+                // Reconstruct dataToSave with the modified value, including dateTimeStr
+                dataToSave = dateTimeStr + " - " + sensorName + ": " + std::to_string(modifiedValue);
 
                 ESP_LOGI("saveDataToNVS", "Anomaly introduced. Modified %s value from %.2f to %.2f",
                          sensorName.c_str(), sensorValue, modifiedValue);
             }
         }
     } else {
-        ESP_LOGW("saveDataToNVS", "Invalid data format: %s", newSensorData.c_str());
-        // Proceed with original newSensorData
+        ESP_LOGW("saveDataToNVS", "Sensor name '%s' not found in data: %s", sensorName.c_str(), newSensorData.c_str());
+        // Optionally, handle this case differently or proceed with original newSensorData
     }
 
     // Proceed to save dataToSave to NVS
@@ -515,13 +572,13 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
     int32_t currentIndex = 0;
     err = nvs_get_i32(nvsHandle, NVS_INDEX_KEY, &currentIndex);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        currentIndex = 0;  // No previous data, start at 0
+        currentIndex = 0; // No previous data, start at 0
     }
 
     char key[32];
-    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex);  // Generate unique key
+    snprintf(key, sizeof(key), "%s%" PRIi32, RECORD_KEY_PREFIX, currentIndex); // Generate unique key
 
-    err = nvs_set_str(nvsHandle, key, dataToSave.c_str());  // Save dataToSave instead of newSensorData
+    err = nvs_set_str(nvsHandle, key, dataToSave.c_str());
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Failed to write to NVS: %s", esp_err_to_name(err));
     } else {
@@ -535,7 +592,7 @@ void ESP32DerivedClass::saveDataToNVS(const std::string& sensorName, const std::
         ESP_LOGE("NVS", "Failed to update NVS index: %s", esp_err_to_name(err));
     }
 
-    err = nvs_commit(nvsHandle);  // Commit to ensure data is stored
+    err = nvs_commit(nvsHandle); // Commit to ensure data is stored
     if (err != ESP_OK) {
         ESP_LOGE("NVS", "Error committing NVS: %s", esp_err_to_name(err));
     }
@@ -1076,45 +1133,48 @@ void on_data_sent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 
 //     return connected;
 // }
-
 extern "C" void app_main() {
-    // Initialize NVS, ADC, and I2C
+    // Initialize NVS and ADC
     initNVS();
     initADC();
-    i2c_master_init();
+
+    // Initialize I2C for DS3231
+    i2c_master_init(I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO);
     ESP32DerivedClass esp32;
+    //esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    struct tm timeinfo;
 
-    // Sync time with NTP and set DS3231 (includes Wi-Fi initialization)
-    sync_time_with_ntp_and_set_ds3231();
 
+    ds3231_clear_alarm_flags();
     // Configure wake-up pin (SQW from DS3231)
     configure_wakeup_pin();
 
-    // Register ESP-NOW callbacks
+    // Initialize ESP-NOW
+    initWiFi();
+    initESPNow();
     esp_now_register_recv_cb(onResponseReceived);
     esp_now_register_send_cb(on_data_sent);
 
-    // Enter deep sleep to wait for the first scheduled wake-up
-    ESP_LOGI("Main", "Entering initial deep sleep...");
-    enter_deep_sleep_until_alarm();
 
+    // Main loop
     while (true) {
-        // Reinitialize peripherals after wake-up
-        i2c_master_init();
-
         // Initialize flags upon wake-up
         auhReceived = false;
         auhProcessed = false;
         dataTransmissionComplete = false;
 
         // Get current time
-        struct tm timeinfo;
-        ds3231_get_time(&timeinfo);
+        if (!ds3231_get_time(&timeinfo)) {
+            ESP_LOGE("Main", "Failed to get time from DS3231. Setting next alarm and sleeping.");
+            set_next_alarm(&timeinfo);
+            enter_deep_sleep_until_alarm();
+        }
 
         ESP_LOGI("Main", "Current time: %02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
 
-        if (timeinfo.tm_hour == 6 || timeinfo.tm_hour == 18) {
-            // At 6 AM and 6 PM: Check battery and collect data
+        // Perform tasks based on the current hour
+        if (timeinfo.tm_hour == 6 || timeinfo.tm_hour == 15) {
+            // Check battery level
             float batteryLevel = esp32.checkBatteryLevel(adc_handle);
             if (batteryLevel > 30.0) {
                 ESP_LOGI("Main", "Battery level sufficient. Reading sensor data.");
@@ -1123,6 +1183,7 @@ extern "C" void app_main() {
             } else {
                 ESP_LOGW("Main", "Battery level low. Skipping sensor reading.");
             }
+
             // Set next alarm and enter deep sleep
             set_next_alarm(&timeinfo);
             enter_deep_sleep_until_alarm();
@@ -1140,7 +1201,7 @@ extern "C" void app_main() {
 
                 if (auhReceived && !sendingInProgress) {
                     ESP_LOGI("Main", "'AUH?' received. Starting data transmission.");
-                    // Data transmission is handled in callbacks
+                    // Handle data transmission here or in callbacks
                 }
 
                 vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
@@ -1161,3 +1222,4 @@ extern "C" void app_main() {
         }
     }
 }
+
